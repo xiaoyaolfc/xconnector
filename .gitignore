@@ -1,0 +1,22 @@
+# 强制包含项目配置文件
+!requirements.txt
+!Pipfile
+!Pipfile.lock
+!pyproject.toml
+
+# 排除虚拟环境
+.venv/
+venv/
+env/
+
+# Python 特定排除
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 通用开发排除
+.DS_Store
+Thumbs.db
+*.log
+.env

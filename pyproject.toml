@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xconnector"
+version = "0.1.0"
+description = "A sdk for self inference engine"
+authors = [
+    {name = "xxx", email = "xxx@gmail.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # 可以添加项目依赖，例如 pytest-asyncio（解决之前的asyncio警告）
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.urls]
+# 可选：添加项目链接（如主页、源码），格式例如：
+# Homepage = "https://example.com"
+
+# 修正这里！正确的pytest配置section格式
+[tool.pytest.ini_options]
+pythonpath = [
+    ".",  # 将项目根目录添加到Python路径，解决导入问题
+]
