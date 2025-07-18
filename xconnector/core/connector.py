@@ -10,7 +10,7 @@ from xconnector.core.plugin_manager import PluginManager
 from xconnector.core.router import Router
 from xconnector.interfaces.base_interface import BaseInterface
 from xconnector.utils.config import ConnectorConfig
-from xconnector.utils.logging import get_logger
+from xconnector.utils.xconnector_logging import get_logger
 
 logger = get_logger(__name__)
 

@@ -1,13 +1,12 @@
 # xconnector/interfaces/base_interface.py
 import asyncio
-import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union, Callable, Tuple
 from enum import Enum
 from dataclasses import dataclass
 from datetime import datetime
 
-from xconnector.utils.logging import get_logger
+from xconnector.utils.xconnector_logging import get_logger
 
 logger = get_logger(__name__)
 

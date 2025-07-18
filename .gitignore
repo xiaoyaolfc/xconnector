@@ -21,3 +21,9 @@ Thumbs.db
 *.log
 .env
 xconnector-recovered-backup/
+
+# 日志排除
+*.log
+logs/
+log/
+/xconnector/utils/xconnector/

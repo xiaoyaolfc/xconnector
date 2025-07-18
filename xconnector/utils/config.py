@@ -2,12 +2,12 @@
 import os
 import json
 import yaml
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
 from enum import Enum
 
-from xconnector.utils.logging import get_logger
+from xconnector.utils.xconnector_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -658,3 +658,15 @@ class ConfigManager:
                 },
                 {
                     "name": "lmcache",
+                    "type": "cache",
+                    "class_path": "xconnector.adapters.cache.lmcache_adapter.LMCacheAdapter",
+                    "config": {
+                        "cache_size": "100MB",
+                        "cache_type": "memory"
+                    },
+                    "enabled": True,
+                    "priority": 1,
+                    "dependencies": ["lmcache"]
+                }
+            ]
+        }
