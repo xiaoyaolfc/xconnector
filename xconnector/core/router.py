@@ -8,7 +8,7 @@ from enum import Enum
 from abc import ABC, abstractmethod
 
 from xconnector.interfaces.base_interface import BaseInterface
-from xconnector.utils.logging import get_logger
+from xconnector.utils.xconnector_logging import get_logger
 
 logger = get_logger(__name__)
 
