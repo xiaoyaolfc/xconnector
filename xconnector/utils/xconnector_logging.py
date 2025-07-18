@@ -374,22 +374,23 @@ def critical(msg: str, logger_name: str = "xconnector") -> None:
 
 
 # 使用示例
-if __name__ == "__main__":
-    # 测试日志系统
-    logger = get_logger(__name__)
 
-    logger.debug("This is a debug message")
-    logger.info("This is an info message")
-    logger.warning("This is a warning message")
-    logger.error("This is an error message")
-    logger.critical("This is a critical message")
-
-    # 自定义日志器
-    custom_logger = create_logger("custom", level="DEBUG")
-    custom_logger.info("Custom logger message")
-
-    # 列出所有日志器
-    print("Available loggers:", list_loggers())
-
-    # 列出日志文件
-    print("Log files:", get_log_files())
+# if __name__ == "__main__":
+#     # 测试日志系统
+#     logger = get_logger(__name__)
+#
+#     logger.debug("This is a debug message")
+#     logger.info("This is an info message")
+#     logger.warning("This is a warning message")
+#     logger.error("This is an error message")
+#     logger.critical("This is a critical message")
+#
+#     # 自定义日志器
+#     custom_logger = create_logger("custom", level="DEBUG")
+#     custom_logger.info("Custom logger message")
+#
+#     # 列出所有日志器
+#     print("Available loggers:", list_loggers())
+#
+#     # 列出日志文件
+#     print("Log files:", get_log_files())
