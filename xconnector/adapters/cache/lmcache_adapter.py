@@ -2,8 +2,8 @@
 import asyncio
 from typing import Any, Optional, Tuple
 import torch
-from .adapter import BaseAdapter
-from .interfaces import LMCacheInterface
+from xconnector.vllm.xconnector.adapter import BaseAdapter
+from xconnector.vllm.xconnector.interfaces import LMCacheInterface
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.forward_context import ForwardContext
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks

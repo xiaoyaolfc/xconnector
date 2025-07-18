@@ -1,5 +1,4 @@
-import pytest
-from xconnector.vllm.xconnector.connector import XConnector
+from xconnector.core.connector import XConnector
 
 
 

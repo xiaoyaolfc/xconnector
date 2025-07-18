@@ -1,6 +1,6 @@
 # xconnector/adapter.py
-from .core import XConnectorCore
-from .interfaces import VLLMInterface, LMCacheInterface
+from xconnector.core.core import XConnectorCore
+
 
 class BaseAdapter:
     def __init__(self, core: XConnectorCore):

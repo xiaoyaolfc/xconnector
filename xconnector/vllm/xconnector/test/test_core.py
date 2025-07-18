@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from xconnector.vllm.xconnector.core import XConnectorCore
+from xconnector.core.core import XConnectorCore
 from xconnector.vllm.xconnector.interfaces import VLLMInterface, LMCacheInterface
 
 

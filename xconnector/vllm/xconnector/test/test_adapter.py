@@ -1,7 +1,5 @@
-import pytest
-from xconnector.vllm.xconnector.core import XConnectorCore
-from xconnector.vllm.xconnector.adapter import BaseAdapter
-from xconnector.vllm.xconnector.vllm_adapter import VLLMAdapter
+from xconnector.core.core import XConnectorCore
+from xconnector.adapters.inference.vllm_adapter import VLLMAdapter
 
 
 class MockCore(XConnectorCore):
