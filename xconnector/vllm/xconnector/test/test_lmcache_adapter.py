@@ -1,7 +1,6 @@
-import asyncio
 import pytest
-from xconnector.vllm.xconnector.core import XConnectorCore
-from xconnector.vllm.xconnector.lmcache_adapter import LMCacheAdapter
+from xconnector.core.core import XConnectorCore
+from xconnector.adapters.cache.lmcache_adapter import LMCacheAdapter
 from vllm.forward_context import ForwardContext
 from vllm.v1.request import Request  # 导入正确的Request类
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks

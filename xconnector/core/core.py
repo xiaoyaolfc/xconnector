@@ -2,7 +2,7 @@
 import asyncio
 import inspect
 from typing import Any, Coroutine, Dict, Tuple
-from .interfaces import VLLMInterface, LMCacheInterface
+from xconnector.vllm.xconnector.interfaces import VLLMInterface, LMCacheInterface
 
 class XConnectorCore:
     def __init__(self):
