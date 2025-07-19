@@ -164,15 +164,23 @@ class XConnector:
             BaseInterface: 加载的适配器实例
         """
         try:
+            # 确保插件管理器返回适配器实例
             adapter_instance = self.plugin_manager.load_adapter(adapter_config, self.core)
+
+            # 确保我们有一个有效的适配器实例
+            if not adapter_instance:
+                raise ValueError(f"PluginManager returned None for adapter: {adapter_config.name}")
 
             # 根据类型注册到相应的注册表
             if adapter_config.type == AdapterType.INFERENCE:
                 self.inference_adapters[adapter_config.name] = adapter_instance
+                logger.debug(f"Added adapter to inference_adapters: {adapter_config.name}")
             elif adapter_config.type == AdapterType.CACHE:
                 self.cache_adapters[adapter_config.name] = adapter_instance
             elif adapter_config.type == AdapterType.DISTRIBUTED:
                 self.distributed_adapters[adapter_config.name] = adapter_instance
+            else:
+                raise ValueError(f"Unknown adapter type: {adapter_config.type}")
 
             logger.info(f"Loaded adapter: {adapter_config.name} ({adapter_config.type.value})")
             return adapter_instance
