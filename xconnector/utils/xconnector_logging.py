@@ -160,7 +160,7 @@ def get_logger(name: str, level: Optional[str] = None) -> logging.Logger:
                     logger.error(f"Failed to create file handler: {e}")
 
         # 防止日志传播到根日志器
-        logger.propagate = False
+        logger.propagate = True
 
         # 缓存日志器
         _loggers[name] = logger
