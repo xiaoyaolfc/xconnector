@@ -436,6 +436,9 @@ class BaseInterface(ABC):
         return self.status in [AdapterStatus.READY, AdapterStatus.RUNNING]
 
     def __str__(self) -> str:
+        # 添加防御性检查
+        if not hasattr(self, 'adapter_version'):
+            return f"BrokenAdapter({self.adapter_name})"
         return f"{self.adapter_name} (v{self.adapter_version})"
 
     def __repr__(self) -> str:

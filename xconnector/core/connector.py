@@ -153,7 +153,7 @@ class XConnector:
 
     # === 公共 API ===
 
-    def load_adapter(self, adapter_config: AdapterConfig) -> BaseInterface:
+    async def load_adapter(self, adapter_config: AdapterConfig) -> BaseInterface:
         """
         动态加载适配器
 
@@ -164,45 +164,77 @@ class XConnector:
             BaseInterface: 加载的适配器实例
         """
         try:
-            adapter_instance = self.plugin_manager.load_adapter(adapter_config, self.core)
+            # 确保插件管理器返回适配器实例
+            adapter_instance = await self.plugin_manager.load_adapter(adapter_config, self.core)
+
+            # 确保我们有一个有效的适配器实例
+            if not adapter_instance:
+                raise ValueError(f"PluginManager returned None for adapter: {adapter_config.name}")
+
+            # 获取适配器类型的值
+            adapter_type_value = adapter_config.type.value
 
             # 根据类型注册到相应的注册表
-            if adapter_config.type == AdapterType.INFERENCE:
+            if adapter_type_value == AdapterType.INFERENCE.value:
+                # 确保适配器被正确添加到字典
                 self.inference_adapters[adapter_config.name] = adapter_instance
-            elif adapter_config.type == AdapterType.CACHE:
+            elif adapter_type_value == AdapterType.CACHE.value:
                 self.cache_adapters[adapter_config.name] = adapter_instance
-            elif adapter_config.type == AdapterType.DISTRIBUTED:
+            elif adapter_type_value == AdapterType.DISTRIBUTED.value:
                 self.distributed_adapters[adapter_config.name] = adapter_instance
+            else:
+                raise ValueError(f"Unknown adapter type: {adapter_type_value}")
 
-            logger.info(f"Loaded adapter: {adapter_config.name} ({adapter_config.type.value})")
+            logger.info(f"Loaded adapter: {adapter_config.name} ({adapter_type_value})")
             return adapter_instance
 
         except Exception as e:
             logger.error(f"Failed to load adapter {adapter_config.name}: {e}")
             raise
 
-    def unload_adapter(self, adapter_name: str, adapter_type: AdapterType):
+    def unload_adapter(self, adapter_name: str, adapter_type: AdapterType) -> Optional[BaseInterface]:
         """
         卸载适配器
 
         Args:
             adapter_name: 适配器名称
             adapter_type: 适配器类型
+
+        Returns:
+            Optional[BaseInterface]: 卸载的适配器实例
         """
         try:
-            if adapter_type == AdapterType.INFERENCE:
+            adapter = None
+            adapter_type_value = adapter_type.value
+
+            # 从正确的字典中移除适配器
+            if adapter_type_value == AdapterType.INFERENCE.value:
                 adapter = self.inference_adapters.pop(adapter_name, None)
-            elif adapter_type == AdapterType.CACHE:
+            elif adapter_type_value == AdapterType.CACHE.value:
                 adapter = self.cache_adapters.pop(adapter_name, None)
-            elif adapter_type == AdapterType.DISTRIBUTED:
+            elif adapter_type_value == AdapterType.DISTRIBUTED.value:
                 adapter = self.distributed_adapters.pop(adapter_name, None)
             else:
-                adapter = None
+                logger.error(f"Unknown adapter type: {adapter_type_value}")
+                return None
 
-            if adapter and hasattr(adapter, 'cleanup'):
-                adapter.cleanup()
+            # 执行清理操作
+            if adapter:
+                if hasattr(adapter, 'cleanup'):
+                    adapter.cleanup()
 
-            logger.info(f"Unloaded adapter: {adapter_name} ({adapter_type.value})")
+                if hasattr(adapter, 'stop') and callable(adapter.stop):
+                    # 对于异步方法，我们只记录警告，不实际调用
+                    if asyncio.iscoroutinefunction(adapter.stop):
+                        logger.warning(f"Adapter {adapter_name} has async stop method, "
+                                       "but it cannot be called from unload_adapter. "
+                                       "Please call stop separately before unloading.")
+                    else:
+                        # 如果是同步方法，直接调用
+                        adapter.stop()
+
+            logger.info(f"Unloaded adapter: {adapter_name} ({adapter_type_value})")
+            return adapter
 
         except Exception as e:
             logger.error(f"Failed to unload adapter {adapter_name}: {e}")
@@ -219,13 +251,27 @@ class XConnector:
         Returns:
             Optional[BaseInterface]: 适配器实例，不存在则返回None
         """
-        if adapter_type == AdapterType.INFERENCE:
-            return self.inference_adapters.get(adapter_name)
-        elif adapter_type == AdapterType.CACHE:
-            return self.cache_adapters.get(adapter_name)
-        elif adapter_type == AdapterType.DISTRIBUTED:
-            return self.distributed_adapters.get(adapter_name)
-        return None
+        try:
+            adapter_type_value = adapter_type.value
+
+            # 添加调试日志
+            logger.debug(f"Getting adapter: {adapter_name} of type {adapter_type_value}")
+
+            if adapter_type_value == AdapterType.INFERENCE.value:
+                logger.debug(f"Inference adapters: {list(self.inference_adapters.keys())}")
+                return self.inference_adapters.get(adapter_name)
+            elif adapter_type_value == AdapterType.CACHE.value:
+                logger.debug(f"Cache adapters: {list(self.cache_adapters.keys())}")
+                return self.cache_adapters.get(adapter_name)
+            elif adapter_type_value == AdapterType.DISTRIBUTED.value:
+                logger.debug(f"Distributed adapters: {list(self.distributed_adapters.keys())}")
+                return self.distributed_adapters.get(adapter_name)
+            else:
+                logger.error(f"Unknown adapter type: {adapter_type_value}")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to get adapter {adapter_name}: {e}")
+            return None
 
     def list_adapters(self) -> Dict[str, List[str]]:
         """
@@ -263,15 +309,24 @@ class XConnector:
 
         self.is_running = True
 
+        # 添加调试日志
+        logger.debug("Starting XConnector...")
+        logger.debug(f"Inference adapters: {list(self.inference_adapters.keys())}")
+        logger.debug(f"Cache adapters: {list(self.cache_adapters.keys())}")
+        logger.debug(f"Distributed adapters: {list(self.distributed_adapters.keys())}")
+
         # 启动所有适配器
         for adapters in [self.inference_adapters, self.cache_adapters, self.distributed_adapters]:
-            for adapter in adapters.values():
-                if hasattr(adapter, 'start'):
-                    await adapter.start()
+            for name, adapter in adapters.items():
+                if adapter is None:
+                    logger.error(f"Adapter {name} is None, skipping start")
+                    continue
 
-        # 启动健康检查
-        if self.config.enable_health_check and not self.health_check_task:
-            self._setup_health_check()
+                if hasattr(adapter, 'start'):
+                    logger.debug(f"Starting adapter: {name}")
+                    await adapter.start()
+                else:
+                    logger.warning(f"Adapter {name} has no start method")
 
         logger.info("XConnector started successfully")
 
@@ -282,6 +337,12 @@ class XConnector:
             return
 
         self.is_running = False
+
+        # 添加调试日志
+        logger.debug("Stopping XConnector...")
+        logger.debug(f"Inference adapters: {list(self.inference_adapters.keys())}")
+        logger.debug(f"Cache adapters: {list(self.cache_adapters.keys())}")
+        logger.debug(f"Distributed adapters: {list(self.distributed_adapters.keys())}")
 
         # 停止健康检查
         if self.health_check_task:
@@ -294,9 +355,16 @@ class XConnector:
 
         # 停止所有适配器
         for adapters in [self.inference_adapters, self.cache_adapters, self.distributed_adapters]:
-            for adapter in adapters.values():
+            for name, adapter in adapters.items():
+                if adapter is None:
+                    logger.error(f"Adapter {name} is None, skipping stop")
+                    continue
+
                 if hasattr(adapter, 'stop'):
+                    logger.debug(f"Stopping adapter: {name}")
                     await adapter.stop()
+                else:
+                    logger.warning(f"Adapter {name} has no stop method")
 
         logger.info("XConnector stopped successfully")
 
