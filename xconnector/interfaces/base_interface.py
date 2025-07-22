@@ -87,7 +87,7 @@ class BaseInterface(ABC):
         self.adapter_name = self.__class__.__name__
         self.adapter_version = getattr(self, '__version__', '1.0.0')
         self.adapter_description = getattr(self, '__doc__', '')
-        self.adapter_author = getattr(self, '__author__', 'Unknown')
+        self.adapter_author = getattr(self, '__author__', 'xiaoyaolfc')
         self.adapter_dependencies = getattr(self, '__dependencies__', [])
 
         # 事件回调
