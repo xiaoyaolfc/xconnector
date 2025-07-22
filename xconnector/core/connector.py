@@ -1,12 +1,11 @@
 # xconnector/core/connector.py
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import torch
 
-from xconnector.core.core import XConnectorCore
 from xconnector.core.plugin_manager import PluginManager
 from xconnector.core.router import Router
 from xconnector.interfaces.base_interface import BaseInterface
@@ -59,7 +58,8 @@ class XConnector:
             return
 
         self.config = config or ConnectorConfig()
-        self.core = XConnectorCore()
+
+        # 原 XConnectorCore 的功能整合到这里
         self.plugin_manager = PluginManager()
         self.router = Router()
 
@@ -68,19 +68,110 @@ class XConnector:
         self.cache_adapters: Dict[str, BaseInterface] = {}
         self.distributed_adapters: Dict[str, BaseInterface] = {}
 
+        # 原 core 的消息队列和任务管理功能
+        self.connection_table: Dict[str, asyncio.Queue] = {}
+        self.task_table: Dict[str, asyncio.Task] = {}
+
         # 运行时状态
         self.is_running = False
         self.health_check_task: Optional[asyncio.Task] = None
 
         # 初始化核心组件
         self._initialize_components()
-
-        # 加载预配置的适配器
         self._load_configured_adapters()
 
         self._initialized = True
         logger.info("XConnector initialized successfully")
 
+    # 原core方法，保持兼容性
+    def register_vllm(self, adapter: BaseInterface):
+        """兼容性方法：注册 VLLM 适配器"""
+        self.inference_adapters["vllm"] = adapter
+        self.router.register_adapter("vllm", adapter)
+
+    def register_lmcache(self, adapter: BaseInterface):
+        """兼容性方法：注册 LMCache 适配器"""
+        self.cache_adapters["lmcache"] = adapter
+        self.router.register_adapter("lmcache", adapter)
+
+    async def route(self, endpoint: str, *args, **kwargs) -> Any:
+        """
+        路由消息到目标端点（原 core 方法）
+
+        Args:
+            endpoint: 端点路径，格式为 'adapter_type/method'
+            *args, **kwargs: 方法参数
+        """
+        try:
+            if '/' not in endpoint:
+                raise ValueError(f"Invalid endpoint format: {endpoint}. Expected 'adapter_type/method'")
+
+            adapter_type, method = endpoint.split('/', 1)
+
+            # 根据适配器类型获取适配器
+            adapter = None
+            if adapter_type == 'vllm':
+                adapter = self.get_adapter("vllm", AdapterType.INFERENCE)
+            elif adapter_type == 'lmcache':
+                adapter = self.get_adapter("lmcache", AdapterType.CACHE)
+            elif adapter_type in self.inference_adapters:
+                adapter = self.inference_adapters[adapter_type]
+            elif adapter_type in self.cache_adapters:
+                adapter = self.cache_adapters[adapter_type]
+            elif adapter_type in self.distributed_adapters:
+                adapter = self.distributed_adapters[adapter_type]
+
+            if not adapter:
+                raise ValueError(f"Adapter not found for type: {adapter_type}")
+
+            handler = getattr(adapter, method, None)
+            if not handler:
+                raise AttributeError(f"Method '{method}' not found in adapter '{adapter_type}'")
+
+            if asyncio.iscoroutinefunction(handler):
+                return await handler(*args, **kwargs)
+            else:
+                return handler(*args, **kwargs)
+
+        except Exception as e:
+            logger.error(f"Route failed for endpoint {endpoint}: {e}")
+            raise
+
+    def create_endpoint(self, endpoint: str, queue_size: int = 100):
+        """创建端点的消息队列"""
+        if endpoint not in self.connection_table:
+            self.connection_table[endpoint] = asyncio.Queue(queue_size)
+            logger.debug(f"Created endpoint queue: {endpoint}")
+
+    async def send(self, endpoint: str, *args, **kwargs):
+        """发送消息到指定端点"""
+        if endpoint not in self.connection_table:
+            self.create_endpoint(endpoint)
+        await self.connection_table[endpoint].put((args, kwargs))
+
+    async def receive(self, endpoint: str) -> Tuple[Tuple, Dict]:
+        """从端点接收消息"""
+        if endpoint not in self.connection_table:
+            self.create_endpoint(endpoint)
+        return await self.connection_table[endpoint].get()
+
+    def start_task(self, name: str, coro):
+        """启动后台任务"""
+        if asyncio.iscoroutine(coro):
+            self.task_table[name] = asyncio.create_task(coro)
+        else:
+            # 如果传入的是协程函数，需要调用它
+            self.task_table[name] = asyncio.create_task(coro)
+        logger.debug(f"Started task: {name}")
+
+    def stop_task(self, name: str):
+        """停止后台任务"""
+        if name in self.task_table:
+            self.task_table[name].cancel()
+            del self.task_table[name]
+            logger.debug(f"Stopped task: {name}")
+
+    # === 核心功能 ===
     def _initialize_components(self):
         """初始化核心组件"""
         # 注册内置适配器
@@ -296,7 +387,11 @@ class XConnector:
         Returns:
             Any: 方法执行结果
         """
-        return await self.router.route(source, target, method, *args, **kwargs)
+        try:
+            # 方式1: 使用 router 进行路由（推荐）
+            return await self.router.route(source, target, method, *args, **kwargs)
+        except Exception as router_error:
+            logger.warning(f"Router failed, trying direct route: {router_error}")
 
     async def start(self):
         """启动 XConnector"""
@@ -331,18 +426,16 @@ class XConnector:
         logger.info("XConnector started successfully")
 
     async def stop(self):
-        """停止 XConnector"""
+        """停止 XConnector（增强版本）"""
         if not self.is_running:
             logger.warning("XConnector is not running")
             return
 
         self.is_running = False
 
-        # 添加调试日志
-        logger.debug("Stopping XConnector...")
-        logger.debug(f"Inference adapters: {list(self.inference_adapters.keys())}")
-        logger.debug(f"Cache adapters: {list(self.cache_adapters.keys())}")
-        logger.debug(f"Distributed adapters: {list(self.distributed_adapters.keys())}")
+        # 停止所有后台任务
+        for task_name in list(self.task_table.keys()):
+            self.stop_task(task_name)
 
         # 停止健康检查
         if self.health_check_task:
@@ -357,23 +450,30 @@ class XConnector:
         for adapters in [self.inference_adapters, self.cache_adapters, self.distributed_adapters]:
             for name, adapter in adapters.items():
                 if adapter is None:
-                    logger.error(f"Adapter {name} is None, skipping stop")
                     continue
 
                 if hasattr(adapter, 'stop'):
-                    logger.debug(f"Stopping adapter: {name}")
-                    await adapter.stop()
-                else:
-                    logger.warning(f"Adapter {name} has no stop method")
+                    try:
+                        await adapter.stop()
+                    except Exception as e:
+                        logger.error(f"Error stopping adapter {name}: {e}")
+
+        # 清理消息队列
+        for endpoint, queue in self.connection_table.items():
+            try:
+                # 清空队列
+                while not queue.empty():
+                    queue.get_nowait()
+            except Exception:
+                pass
+
+        self.connection_table.clear()
 
         logger.info("XConnector stopped successfully")
 
     async def get_health_status(self) -> Dict[str, Any]:
         """
-        获取健康状态
-
-        Returns:
-            Dict[str, Any]: 健康状态信息
+        获取健康状态（增强版本）
         """
         status = {
             "connector": {
@@ -382,9 +482,13 @@ class XConnector:
                     "inference": len(self.inference_adapters),
                     "cache": len(self.cache_adapters),
                     "distributed": len(self.distributed_adapters)
-                }
+                },
+                "active_tasks": len(self.task_table),
+                "active_endpoints": len(self.connection_table)
             },
-            "adapters": {}
+            "adapters": {},
+            "tasks": list(self.task_table.keys()),
+            "endpoints": list(self.connection_table.keys())
         }
 
         # 检查各个适配器的健康状态
@@ -411,6 +515,37 @@ class XConnector:
                     }
 
         return status
+
+    def cleanup(self):
+        """清理所有资源"""
+        try:
+            # 清理任务
+            for task_name in list(self.task_table.keys()):
+                self.stop_task(task_name)
+
+            # 清理队列
+            self.connection_table.clear()
+
+            # 清理适配器
+            for adapters in [self.inference_adapters, self.cache_adapters, self.distributed_adapters]:
+                for adapter in adapters.values():
+                    if adapter and hasattr(adapter, 'cleanup'):
+                        try:
+                            adapter.cleanup()
+                        except Exception as e:
+                            logger.error(f"Error during adapter cleanup: {e}")
+
+            logger.info("XConnector cleanup completed")
+
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+
+    def __del__(self):
+        """析构函数"""
+        try:
+            self.cleanup()
+        except:
+            pass  # 忽略析构函数中的错误
 
     # === 兼容性属性 (保持与旧版本的兼容) ===
 

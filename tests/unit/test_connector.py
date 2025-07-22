@@ -187,7 +187,7 @@ async def test_load_adapter(xconnector, mock_plugin_manager, caplog):
 
     # 验证插件管理器方法被调用
     mock_plugin_manager.load_adapter.assert_called_once_with(
-        adapter_config, xconnector.core
+        adapter_config, xconnector
     )
 
     # 验证适配器被正确加载
