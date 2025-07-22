@@ -1,0 +1,38 @@
+Common:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: 64
+  max-model-len: 16384
+
+Frontend:
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  endpoint: dynamo.VllmWorker.generate
+  port: 8000
+  router: round-robin
+
+VllmWorker:
+  remote-prefill: true
+  conditional-disagg: true
+  max-local-prefill-length: 10
+  max-prefill-queue-size: 2
+  enable-prefix-caching: true
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1
+  extensions:
+    xconnector:
+      enabled: true
+      service_mode: remote  # 使用远程模式
+      service_url: http://xconnector-service:8081
+      fail_on_error: false
+      # 远程模式下，adapters 配置在服务端
+      remote_config:
+        timeout: 30
+        retry_count: 3
+
+PrefillWorker:
+  max-num-batched-tokens: 16384
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1
