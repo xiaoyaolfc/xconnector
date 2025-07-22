@@ -1,0 +1,60 @@
+# configs/disagg_xconnector.yaml
+# 把这个配置文件替换到 ai-dynamo/examples/vllm_v0/configs
+
+Common:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: 64
+  max-model-len: 16384
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+
+Frontend:
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  endpoint: dynamo.VllmWorker.generate
+  port: 8000
+  router: round-robin
+  common-configs: [block-size]
+
+VllmWorker:
+  remote-prefill: true
+  conditional-disagg: true
+  max-local-prefill-length: 10
+  max-prefill-queue-size: 2
+  enable-prefix-caching: true
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1
+  common-configs: [ model, block-size, max-model-len, kv-transfer-config ]
+  extensions:
+    xconnector:
+      enabled: true
+      # Optional: specify XConnector path if not in PYTHONPATH
+      xconnector_path: "/path/to/xconnector"
+      fail_on_error: false  # Continue even if XConnector fails to load
+      adapters:
+        vllm:
+          enabled: true
+          type: "inference"
+          class_path: "xconnector.adapters.inference.vllm_adapter.VLLMAdapter"
+          config:
+            enable_prefix_caching: true
+        lmcache:
+          enabled: true
+          type: "cache"
+          class_path: "xconnector.adapters.cache.lmcache_adapter.LMCacheAdapter"
+          config:
+            storage_backend: "local"
+        dynamo:
+          enabled: true
+          type: "distributed"
+          class_path: "xconnector.adapters.distributed.dynamo_adapter.DynamoAdapter"
+          config:
+            namespace: "dynamo"
+
+PrefillWorker:
+  max-num-batched-tokens: 16384
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 1
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]
