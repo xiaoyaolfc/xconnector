@@ -21,17 +21,10 @@ from xconnector.interfaces.base_interface import (
     HealthCheckResult,
     Capability,
 )
+from xconnector.interfaces.cache_manager import CacheManagerInterface, CacheResult, CacheStatus, CacheStats
 from xconnector.utils.xconnector_logging import get_logger
 
 logger = get_logger(__name__)
-
-
-class CacheStatus(Enum):
-    """Cache operation status"""
-    HIT = "hit"
-    MISS = "miss"
-    STORED = "stored"
-    ERROR = "error"
 
 
 @dataclass
@@ -45,7 +38,7 @@ class CacheEntry:
     access_count: int = 0
 
 
-class LMCacheAdapter(BaseAdapter):
+class LMCacheAdapter(BaseAdapter, CacheManagerInterface):
     """
     LMCache Adapter for XConnector
 
@@ -58,19 +51,22 @@ class LMCacheAdapter(BaseAdapter):
     __dependencies__ = ["torch", "lmcache"]
 
     def __init__(self, core_instance=None, config: Dict[str, Any] = None):
-        super().__init__(core_instance, config)
+        # 调用两个父类的初始化
+        BaseAdapter.__init__(self, core_instance, config)
 
         # LMCache configuration
         self.cache_config = config.get("cache_config", {})
         self.storage_backend = config.get("storage_backend", "local")
-        self.max_cache_size = config.get("max_cache_size", 1024)  # MB
+        self.max_cache_size = config.get("max_cache_size", 1024)
         self.enable_compression = config.get("enable_compression", True)
+
+        # 统一的统计信息
+        self.total_queries = 0
+        self.hit_count = 0
+        self.miss_count = 0
 
         # Cache management
         self.cache_entries: Dict[str, CacheEntry] = {}
-        self.cache_hit_count = 0
-        self.cache_miss_count = 0
-        self.total_queries = 0
 
         # LMCache engine instance (will be initialized during setup)
         self.lmcache_engine = None
@@ -78,7 +74,264 @@ class LMCacheAdapter(BaseAdapter):
 
         logger.info(f"LMCacheAdapter initialized with backend: {self.storage_backend}")
 
-    # === Required BaseInterface Methods ===
+    # === CacheManagerInterface 基础方法 ===
+
+    async def initialize(self) -> bool:
+        """统一的初始化方法"""
+        return await self._initialize_impl()
+
+    async def start(self) -> bool:
+        """统一的启动方法"""
+        return await self._start_impl()
+
+    async def stop(self) -> bool:
+        """统一的停止方法"""
+        return await self._stop_impl()
+
+    # === 通用缓存接口 ===
+
+    async def get(self, key: str, default: Any = None) -> CacheResult:
+        """通用缓存获取方法"""
+        self.total_queries += 1
+
+        if key in self.cache_entries:
+            self.hit_count += 1
+            entry = self.cache_entries[key]
+            return CacheResult(
+                status=CacheStatus.HIT,
+                found=True,
+                data=entry,
+                metadata={
+                    "access_count": entry.access_count,
+                    "stored_at": entry.stored_at.isoformat()
+                }
+            )
+        else:
+            self.miss_count += 1
+            return CacheResult(
+                status=CacheStatus.MISS,
+                found=False,
+                data=default
+            )
+
+    async def set(
+            self,
+            key: str,
+            value: Any,
+            ttl: Optional[int] = None,
+            metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """通用缓存设置方法"""
+        try:
+            # 根据 value 类型决定如何存储
+            if isinstance(value, dict) and "tokens" in value:
+                # 创建 CacheEntry 对象
+                entry = CacheEntry(
+                    key=key,
+                    tokens=value.get("tokens", []),
+                    seq_len=value.get("seq_len", 0),
+                    layer_count=value.get("layer_count", 0),
+                    stored_at=datetime.now()
+                )
+                self.cache_entries[key] = entry
+            else:
+                # 直接存储原始值
+                entry = CacheEntry(
+                    key=key,
+                    tokens=[],
+                    seq_len=0,
+                    layer_count=0,
+                    stored_at=datetime.now()
+                )
+                # 将 value 存储在 entry 的额外字段中
+                entry.raw_data = value
+                self.cache_entries[key] = entry
+
+            return True
+        except Exception as e:
+            self.log_error(e, {"operation": "set", "key": key})
+            return False
+
+    async def delete(self, key: str) -> bool:
+        """删除缓存项"""
+        try:
+            if key in self.cache_entries:
+                del self.cache_entries[key]
+                return True
+            return False
+        except Exception as e:
+            self.log_error(e, {"operation": "delete", "key": key})
+            return False
+
+    async def exists(self, key: str) -> bool:
+        """检查缓存项是否存在"""
+        return key in self.cache_entries
+
+    async def clear(self) -> bool:
+        """清空所有缓存"""
+        try:
+            self.cache_entries.clear()
+            # 重置统计信息
+            self.total_queries = 0
+            self.hit_count = 0
+            self.miss_count = 0
+            logger.info("Cache cleared successfully")
+            return True
+        except Exception as e:
+            self.log_error(e, {"operation": "clear"})
+            return False
+
+    async def get_stats(self) -> CacheStats:
+        """获取统一格式的缓存统计信息"""
+        hit_rate = (self.hit_count / max(self.total_queries, 1)) * 100
+
+        return CacheStats(
+            total_queries=self.total_queries,
+            hit_count=self.hit_count,
+            miss_count=self.miss_count,
+            hit_rate=hit_rate,
+            total_size=len(self.cache_entries) * 100,  # 估算大小
+            entry_count=len(self.cache_entries)
+        )
+
+    # === KV 缓存专用接口 ===
+
+    async def retrieve_kv(
+            self,
+            model_input: Any,
+            kv_caches: List[torch.Tensor]
+    ) -> CacheResult:
+        """
+        检索 KV 缓存 - 返回统一的 CacheResult
+        """
+        try:
+            self.total_queries += 1
+
+            # 检查是否应该尝试检索
+            if not hasattr(self, 'lmcache_should_retrieve'):
+                return CacheResult(status=CacheStatus.ERROR, found=False, error="LMCache not initialized")
+
+            retrieve_status = self.lmcache_should_retrieve(model_input)
+
+            if retrieve_status == self.RetrieveStatus.MISS:
+                self.miss_count += 1
+                return CacheResult(status=CacheStatus.MISS, found=False)
+
+            # 尝试从缓存中检索
+            updated_input, skip_forward, hidden_states = self.lmcache_retrieve_kv(
+                None,
+                model_input,
+                self._get_dummy_cache_config(),
+                kv_caches,
+                retrieve_status
+            )
+
+            if skip_forward or hidden_states is not None:
+                self.hit_count += 1
+
+                # 更新缓存条目访问计数
+                cache_key = self._generate_cache_key(model_input)
+                if cache_key in self.cache_entries:
+                    self.cache_entries[cache_key].access_count += 1
+
+                return CacheResult(
+                    status=CacheStatus.HIT,
+                    found=True,
+                    data={
+                        "kv_caches": kv_caches,
+                        "hidden_states": hidden_states,
+                        "skip_forward": skip_forward,
+                        "updated_input": updated_input
+                    }
+                )
+            else:
+                self.miss_count += 1
+                return CacheResult(status=CacheStatus.MISS, found=False)
+
+        except Exception as e:
+            self.log_error(e, {"operation": "retrieve_kv"})
+            return CacheResult(
+                status=CacheStatus.ERROR,
+                found=False,
+                error=str(e)
+            )
+
+    async def store_kv(
+            self,
+            model_input: Any,
+            kv_caches: List[torch.Tensor],
+            hidden_states: Union[torch.Tensor, Any],
+            metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        存储 KV 缓存 - 返回布尔值
+        """
+        try:
+            # 检查是否应该存储
+            if not hasattr(self, 'lmcache_should_store'):
+                return False
+
+            store_status = self.lmcache_should_store(model_input)
+
+            if store_status == self.StoreStatus.SKIP:
+                return False
+
+            # 存储到缓存
+            self.lmcache_store_kv(
+                self._get_dummy_model_config(),
+                self._get_dummy_parallel_config(),
+                self._get_dummy_cache_config(),
+                None,
+                model_input,
+                kv_caches,
+                store_status
+            )
+
+            # 更新缓存条目元数据
+            cache_key = self._generate_cache_key(model_input)
+            tokens = getattr(model_input, 'input_tokens', [])
+            if hasattr(tokens, 'tolist'):
+                tokens = tokens.tolist()
+
+            self.cache_entries[cache_key] = CacheEntry(
+                key=cache_key,
+                tokens=tokens,
+                seq_len=getattr(model_input, 'seq_len', 0),
+                layer_count=len(kv_caches),
+                stored_at=datetime.now()
+            )
+
+            return True
+
+        except Exception as e:
+            self.log_error(e, {"operation": "store_kv"})
+            return False
+
+    async def cleanup_finished(self, request_ids: List[str]) -> int:
+        """清理完成请求的缓存"""
+        count = 0
+        try:
+            # Remove finished requests from cache entries
+            keys_to_remove = []
+            for key, entry in self.cache_entries.items():
+                # Simple cleanup logic
+                if any(str(req_id) in key for req_id in request_ids):
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self.cache_entries[key]
+                count += 1
+
+            if keys_to_remove:
+                logger.info(f"Cleaned up {len(keys_to_remove)} cache entries")
+
+            return count
+
+        except Exception as e:
+            self.log_error(e, {"operation": "cleanup_finished"})
+            return count
+
+    # === BaseAdapter Required Methods ===
 
     async def _initialize_impl(self) -> bool:
         """Initialize LMCache adapter components"""
@@ -109,7 +362,7 @@ class LMCacheAdapter(BaseAdapter):
                 logger.error(f"LMCache not available: {e}")
                 return False
 
-            # Initialize cache engine with dummy configs (will be updated when vLLM provides real configs)
+            # Initialize cache engine with dummy configs
             self._initialize_dummy_configs()
 
             return True
@@ -194,7 +447,7 @@ class LMCacheAdapter(BaseAdapter):
                 )
 
             # Calculate cache efficiency
-            hit_rate = (self.cache_hit_count / max(self.total_queries, 1)) * 100
+            hit_rate = (self.hit_count / max(self.total_queries, 1)) * 100
 
             # Check memory usage (simplified)
             cache_size_mb = len(self.cache_entries) * 0.1  # Estimated
@@ -223,156 +476,10 @@ class LMCacheAdapter(BaseAdapter):
                 timestamp=datetime.now()
             )
 
-    # === Cache Management Methods ===
-
-    async def retrieve_kv(
-            self,
-            model_input: Any,
-            kv_caches: List[torch.Tensor]
-    ) -> Dict[str, Any]:
-        """
-        Retrieve KV caches from LMCache
-
-        Args:
-            model_input: Model input metadata
-            kv_caches: Current KV cache tensors
-
-        Returns:
-            Dict containing cache retrieval results
-        """
-        try:
-            self.total_queries += 1
-
-            # Check if we should attempt retrieval
-            if not hasattr(self, 'lmcache_should_retrieve'):
-                return {"found": False, "status": CacheStatus.ERROR}
-
-            retrieve_status = self.lmcache_should_retrieve(model_input)
-
-            if retrieve_status == self.RetrieveStatus.MISS:
-                self.cache_miss_count += 1
-                return {"found": False, "status": CacheStatus.MISS}
-
-            # Attempt to retrieve from cache
-            updated_input, skip_forward, hidden_states = self.lmcache_retrieve_kv(
-                None,  # model_executable will be provided by vLLM adapter
-                model_input,
-                self._get_dummy_cache_config(),
-                kv_caches,
-                retrieve_status
-            )
-
-            if skip_forward or hidden_states is not None:
-                self.cache_hit_count += 1
-
-                # Update cache entry access count
-                cache_key = self._generate_cache_key(model_input)
-                if cache_key in self.cache_entries:
-                    self.cache_entries[cache_key].access_count += 1
-
-                return {
-                    "found": True,
-                    "status": CacheStatus.HIT,
-                    "kv_caches": kv_caches,
-                    "hidden_states": hidden_states,
-                    "skip_forward": skip_forward,
-                    "updated_input": updated_input
-                }
-            else:
-                self.cache_miss_count += 1
-                return {"found": False, "status": CacheStatus.MISS}
-
-        except Exception as e:
-            self.log_error(e, {"operation": "retrieve_kv"})
-            return {"found": False, "status": CacheStatus.ERROR, "error": str(e)}
-
-    async def store_kv(
-            self,
-            model_input: Any,
-            kv_caches: List[torch.Tensor],
-            hidden_states: Union[torch.Tensor, Any]
-    ) -> Dict[str, Any]:
-        """
-        Store KV caches to LMCache
-
-        Args:
-            model_input: Model input metadata
-            kv_caches: KV cache tensors to store
-            hidden_states: Hidden states to store
-
-        Returns:
-            Dict containing storage results
-        """
-        try:
-            # Check if we should store
-            if not hasattr(self, 'lmcache_should_store'):
-                return {"stored": False, "status": CacheStatus.ERROR}
-
-            store_status = self.lmcache_should_store(model_input)
-
-            if store_status == self.StoreStatus.SKIP:
-                return {"stored": False, "status": CacheStatus.MISS}
-
-            # Store to cache
-            self.lmcache_store_kv(
-                self._get_dummy_model_config(),
-                self._get_dummy_parallel_config(),
-                self._get_dummy_cache_config(),
-                None,  # model_executable will be provided by vLLM adapter
-                model_input,
-                kv_caches,
-                store_status
-            )
-
-            # Update cache entry metadata
-            cache_key = self._generate_cache_key(model_input)
-            tokens = getattr(model_input, 'input_tokens', [])
-            if hasattr(tokens, 'tolist'):
-                tokens = tokens.tolist()
-
-            self.cache_entries[cache_key] = CacheEntry(
-                key=cache_key,
-                tokens=tokens,
-                seq_len=getattr(model_input, 'seq_len', 0),
-                layer_count=len(kv_caches),
-                stored_at=datetime.now()
-            )
-
-            return {"stored": True, "status": CacheStatus.STORED}
-
-        except Exception as e:
-            self.log_error(e, {"operation": "store_kv"})
-            return {"stored": False, "status": CacheStatus.ERROR, "error": str(e)}
-
-    async def cleanup_finished(self, request_ids: set) -> None:
-        """
-        Cleanup cache entries for finished requests
-
-        Args:
-            request_ids: Set of finished request IDs
-        """
-        try:
-            # Remove finished requests from cache entries
-            keys_to_remove = []
-            for key, entry in self.cache_entries.items():
-                # Simple cleanup logic - in practice, you might want more sophisticated logic
-                if any(str(req_id) in key for req_id in request_ids):
-                    keys_to_remove.append(key)
-
-            for key in keys_to_remove:
-                del self.cache_entries[key]
-
-            if keys_to_remove:
-                logger.info(f"Cleaned up {len(keys_to_remove)} cache entries")
-
-        except Exception as e:
-            self.log_error(e, {"operation": "cleanup_finished"})
-
     # === Helper Methods ===
 
     def _generate_cache_key(self, model_input: Any) -> str:
         """Generate cache key from model input"""
-        # Simple key generation - in practice, you might want more sophisticated logic
         request_id = getattr(model_input, 'request_id', 'unknown')
         tokens = getattr(model_input, 'input_tokens', [])
 
@@ -385,7 +492,6 @@ class LMCacheAdapter(BaseAdapter):
 
     def _initialize_dummy_configs(self):
         """Initialize dummy configurations for LMCache"""
-        # These will be replaced with real configs from vLLM
         self.dummy_model_config = type('DummyModelConfig', (), {
             'hidden_size': 4096,
             'num_attention_heads': 32,
@@ -425,12 +531,12 @@ class LMCacheAdapter(BaseAdapter):
 
     def _get_custom_metrics(self) -> Dict[str, Any]:
         """Get LMCache specific metrics"""
-        hit_rate = (self.cache_hit_count / max(self.total_queries, 1)) * 100
+        hit_rate = (self.hit_count / max(self.total_queries, 1)) * 100
 
         return {
             "cache_entries": len(self.cache_entries),
-            "cache_hit_count": self.cache_hit_count,
-            "cache_miss_count": self.cache_miss_count,
+            "cache_hit_count": self.hit_count,
+            "cache_miss_count": self.miss_count,
             "total_queries": self.total_queries,
             "hit_rate": f"{hit_rate:.2f}%",
             "storage_backend": self.storage_backend,
@@ -438,17 +544,17 @@ class LMCacheAdapter(BaseAdapter):
             "compression_enabled": self.enable_compression
         }
 
-    # === Public API Methods ===
+    # === 向后兼容的公共 API 方法 ===
 
     def get_cache_statistics(self) -> Dict[str, Any]:
-        """Get detailed cache statistics"""
-        hit_rate = (self.cache_hit_count / max(self.total_queries, 1)) * 100
+        """保持向后兼容的统计方法"""
+        hit_rate = (self.hit_count / max(self.total_queries, 1)) * 100
 
         return {
             "total_entries": len(self.cache_entries),
             "total_queries": self.total_queries,
-            "cache_hits": self.cache_hit_count,
-            "cache_misses": self.cache_miss_count,
+            "cache_hits": self.hit_count,
+            "cache_misses": self.miss_count,
             "hit_rate": hit_rate,
             "miss_rate": 100 - hit_rate,
             "average_seq_len": (
@@ -462,20 +568,8 @@ class LMCacheAdapter(BaseAdapter):
         }
 
     async def clear_cache(self) -> bool:
-        """Clear all cache entries"""
-        try:
-            self.cache_entries.clear()
-
-            # Reset statistics
-            self.cache_hit_count = 0
-            self.cache_miss_count = 0
-            self.total_queries = 0
-
-            logger.info("Cache cleared successfully")
-            return True
-        except Exception as e:
-            self.log_error(e, {"operation": "clear_cache"})
-            return False
+        """向后兼容的清空缓存方法"""
+        return await self.clear()
 
     async def get_cache_entry(self, cache_key: str) -> Optional[CacheEntry]:
         """Get specific cache entry"""
@@ -484,6 +578,13 @@ class LMCacheAdapter(BaseAdapter):
     def list_cache_entries(self) -> List[str]:
         """List all cache entry keys"""
         return list(self.cache_entries.keys())
+
+    async def list_keys(self, prefix: Optional[str] = None) -> List[str]:
+        """列出缓存键"""
+        if prefix is None:
+            return list(self.cache_entries.keys())
+        else:
+            return [key for key in self.cache_entries.keys() if key.startswith(prefix)]
 
     # === Configuration Update Support ===
 
