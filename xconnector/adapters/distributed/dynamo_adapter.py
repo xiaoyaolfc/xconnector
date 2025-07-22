@@ -650,3 +650,32 @@ class DynamoAdapter(BaseAdapter):
         except Exception as e:
             logger.error(f"Failed to update routing policy: {e}")
             return False
+
+    async def _check_worker_health(self):
+        """执行一次健康检查"""
+        now = datetime.now()
+        for worker_id, worker in list(self.workers.items()):
+            # 检查心跳超时
+            time_since_heartbeat = (now - worker.last_heartbeat).seconds
+
+            if time_since_heartbeat > self.routing_policy.health_check_interval * 2:
+                # 标记为不健康
+                worker.status = WorkerStatus.UNHEALTHY
+                worker.error_count += 1
+
+                # 如果超过阈值则移除
+                if worker.error_count > self.routing_policy.unhealthy_threshold:
+                    await self.unregister_worker(worker_id)
+                    logger.warning(f"Removed unhealthy worker: {worker_id}")
+
+    async def _health_monitor_loop(self):
+        """后台健康监控"""
+        while True:
+            try:
+                await asyncio.sleep(self.routing_policy.health_check_interval)
+                await self._check_worker_health()  # 调用健康检查方法
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Health monitor error: {e}")

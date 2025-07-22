@@ -4,6 +4,7 @@ import logging
 from typing import Any, Dict, List, Optional, Type, Union
 from dataclasses import dataclass
 from enum import Enum
+import torch
 
 from xconnector.core.core import XConnectorCore
 from xconnector.core.plugin_manager import PluginManager
@@ -136,14 +137,10 @@ class XConnector:
         )
 
     def _setup_health_check(self):
-        """设置健康检查"""
-
-        async def health_check_loop():
-            while self.is_running:
-                await self._perform_health_check()
-                await asyncio.sleep(self.config.health_check_interval)
-
-        self.health_check_task = asyncio.create_task(health_check_loop())
+        """设置健康检查任务（不直接启动）"""
+        if self.config.enable_health_check:
+            # 保存健康检查循环的协程，但不启动
+            self._health_check_coro = self._perform_health_check()
 
     def _load_configured_adapters(self):
         """加载配置文件中的适配器"""
@@ -309,6 +306,9 @@ class XConnector:
 
         self.is_running = True
 
+        # 启动健康检查任务
+        if hasattr(self, '_health_check_coro'):
+            self.health_check_task = asyncio.create_task(self._health_check_coro)
         # 添加调试日志
         logger.debug("Starting XConnector...")
         logger.debug(f"Inference adapters: {list(self.inference_adapters.keys())}")
