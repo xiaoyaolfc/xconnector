@@ -2,7 +2,10 @@ import pytest
 import asyncio
 from unittest.mock import MagicMock, patch, AsyncMock
 from xconnector.adapters.distributed.dynamo_adapter import DynamoAdapter
-from xconnector.interfaces.vllm_integration import XConnectorVLLMBridge
+from xconnector.interfaces.interfaces import (
+    VLLMInterface, LMCacheInterface, XConnectorVLLMBridge,
+    register_xconnector_with_vllm
+)
 from xconnector.adapters.cache.lmcache_adapter import LMCacheAdapter
 
 
