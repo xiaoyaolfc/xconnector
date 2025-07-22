@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # XConnector 独立服务
+  xconnector-service:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.xconnector-service
+    container_name: xconnector-service
+    environment:
+      - ETCD_HOST=etcd
+      - ETCD_PORT=2379
+      - NATS_URL=nats://nats:4222
+      - XCONNECTOR_PORT=8081
+      - LOG_LEVEL=INFO
+    networks:
+      - dynamo-network
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - etcd
+      - nats
+
+  # AI-Dynamo Worker (使用官方镜像)
+  dynamo-worker:
+    image: ${DYNAMO_IMAGE:-your-registry/ai-dynamo:latest}
+    container_name: dynamo-worker
+    environment:
+      # XConnector 配置
+      - ENABLE_XCONNECTOR=true
+      - XCONNECTOR_SERVICE_URL=http://xconnector-service:8081
+      # Dynamo 配置
+      - ETCD_HOST=etcd
+      - ETCD_PORT=2379
+      - NATS_URL=nats://nats:4222
+    volumes:
+      # 挂载配置文件
+      - ./configs/disagg_xconnector_remote.yaml:/workspace/configs/disagg.yaml:ro
+      # 挂载 extension loader
+      - ../../integrations/dynamo/extension_loader.py:/xconnector-integration/extension_loader.py:ro
+      # 挂载启动包装脚本
+      - ./dynamo-wrapper/startup-wrapper.py:/workspace/startup-wrapper.py:ro
+    networks:
+      - dynamo-network
+    # 使用包装脚本启动
+    command: ["python", "/workspace/startup-wrapper.py", "serve", "graphs.disagg:Frontend", "-f", "/workspace/configs/disagg.yaml"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - xconnector-service
+      - etcd
+      - nats
+
+  # Frontend service
+  dynamo-frontend:
+    image: ${DYNAMO_IMAGE:-your-registry/ai-dynamo:latest}
+    container_name: dynamo-frontend
+    environment:
+      - ETCD_HOST=etcd
+      - ETCD_PORT=2379
+    volumes:
+      - ./configs/disagg_xconnector_remote.yaml:/workspace/configs/disagg.yaml:ro
+    networks:
+      - dynamo-network
+    ports:
+      - "8000:8000"
+    command: ["dynamo", "serve", "graphs.disagg:Frontend", "-f", "/workspace/configs/disagg.yaml"]
+    depends_on:
+      - dynamo-worker
+
+  # etcd
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: etcd
+    environment:
+      - ETCD_NAME=etcd0
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_CLUSTER=etcd0=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+    networks:
+      - dynamo-network
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - etcd-data:/etcd-data
+
+  # NATS
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats
+    networks:
+      - dynamo-network
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # HTTP monitoring
+    command: ["-js", "-m", "8222"]  # Enable JetStream
+
+networks:
+  dynamo-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  etcd-data:

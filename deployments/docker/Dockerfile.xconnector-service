@@ -1,0 +1,43 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install additional requirements for service mode
+RUN pip install fastapi uvicorn httpx
+
+# Copy XConnector code
+COPY xconnector/ ./xconnector/
+COPY integrations/ ./integrations/
+COPY csrc/ ./csrc/
+
+# Install XConnector
+RUN pip install -e .
+
+# Create service runner
+RUN echo '#!/usr/bin/env python3\n\
+import os\n\
+import sys\n\
+sys.path.insert(0, "/app")\n\
+\n\
+# Run XConnector service\n\
+if __name__ == "__main__":\n\
+    import uvicorn\n\
+    from integrations.dynamo.xconnector_service import app\n\
+    \n\
+    port = int(os.getenv("XCONNECTOR_PORT", "8081"))\n\
+    uvicorn.run(app, host="0.0.0.0", port=port)\n\
+' > /app/run_service.py && chmod +x /app/run_service.py
+
+EXPOSE 8081
+
+CMD ["python", "/app/run_service.py"]
