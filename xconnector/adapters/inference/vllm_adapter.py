@@ -189,6 +189,8 @@ class VLLMAdapter(BaseAdapter):
 
     # === VLLM Core Methods ===
 
+    # 修复 xconnector/adapters/inference/vllm_adapter.py 中的 recv_kv_caches 方法
+
     async def recv_kv_caches(
             self,
             model_executable: torch.nn.Module,
@@ -234,32 +236,31 @@ class VLLMAdapter(BaseAdapter):
                         cached_kv = cache_result.get("kv_caches")
                         skip_forward = cache_result.get("skip_forward", False)
                         updated_input = cache_result.get("updated_input", model_input)
+                        hidden_states = cache_result.get("hidden_states")
 
-                        # Merge cached KV with current KV if needed
-                        if cached_kv and not skip_forward:
+                        # 缓存命中的情况
+                        if skip_forward or hidden_states is not None:
+                            return hidden_states, skip_forward, updated_input
+                        elif cached_kv:
+                            # 有缓存的 KV，但需要继续执行模型
                             merged_kv = self._merge_kv_caches(cached_kv, kv_caches)
-                            # Execute model with merged KV
+                            # 执行模型的前向传播
                             hidden_states = await self._execute_model_forward(
                                 model_executable, updated_input, merged_kv
                             )
                             return hidden_states, False, updated_input
-                        elif skip_forward:
-                            # Skip model forward entirely
-                            hidden_states = cache_result.get("hidden_states")
-                            return hidden_states, True, updated_input
 
                 except Exception as e:
                     logger.error(f"Cache retrieval failed: {e}")
 
-            # No cache hit, proceed normally
-            hidden_states = await self._execute_model_forward(
-                model_executable, model_input, kv_caches
-            )
-            return hidden_states, False, model_input
+            # 缓存未命中的情况：不执行模型前向传播，返回 None
+            # 这表示需要由调用者来执行正常的推理流程
+            self.cache_hits += 0  # 未命中
+            return None, False, model_input
 
         except Exception as e:
             self.log_error(e, {"operation": "recv_kv_caches"})
-            return None, True, model_input
+            return None, True, model_input  # 出错时跳过前向传播
 
     async def send_kv_caches(
             self,
@@ -345,42 +346,54 @@ class VLLMAdapter(BaseAdapter):
 
     async def _should_retrieve_cache(self, model_input: Any) -> bool:
         """Determine if cache retrieval should be attempted"""
-        if not self.enable_prefix_caching:
-            return False
+        try:
+            # 检查是否启用了前缀缓存
+            if not self.enable_prefix_caching:
+                return False
 
-        # Check if this is a prefill request
-        is_prefill = getattr(model_input, 'is_prompt', False)
-        if not is_prefill:
-            return False
+            # 检查是否是 prefill 请求
+            is_prefill = getattr(model_input, 'is_prompt', False)
+            if not is_prefill:
+                return False
 
-        # Check sequence length
-        seq_len = getattr(model_input, 'seq_len', 0)
-        if seq_len < self.config.get('min_cache_seq_len', 32):
-            return False
+            # 检查序列长度
+            seq_len = getattr(model_input, 'seq_len', 0)
+            min_cache_seq_len = self.config.get('min_cache_seq_len', 32)
+            if seq_len < min_cache_seq_len:
+                return False
 
-        return True
+            return True
+
+        except Exception as e:
+            logger.debug(f"Error in _should_retrieve_cache: {e}")
+            return False
 
     async def _should_store_cache(self, model_input: Any) -> bool:
         """Determine if cache storage should be attempted"""
-        # Check if caching is enabled
-        if not self.enable_prefix_caching:
-            return False
+        try:
+            # 检查是否启用了缓存
+            if not self.enable_prefix_caching:
+                return False
 
-        # Check if this is a completed prefill
-        is_prefill = getattr(model_input, 'is_prompt', False)
-        do_sample = getattr(model_input, 'do_sample', True)
+            # 检查是否是完成的 prefill
+            is_prefill = getattr(model_input, 'is_prompt', False)
+            do_sample = getattr(model_input, 'do_sample', True)
 
-        if is_prefill and do_sample:
-            return True
-
-        # Check for decode phase caching
-        if self.config.get('cache_decode_tokens', False):
-            seq_len = getattr(model_input, 'seq_len', 0)
-            chunk_size = self.config.get('chunk_size', 64)
-            if seq_len > 0 and seq_len % chunk_size == 0:
+            if is_prefill and do_sample:
                 return True
 
-        return False
+            # 检查解码阶段的缓存
+            if self.config.get('cache_decode_tokens', False):
+                seq_len = getattr(model_input, 'seq_len', 0)
+                chunk_size = self.config.get('chunk_size', 64)
+                if seq_len > 0 and seq_len % chunk_size == 0:
+                    return True
+
+            return False
+
+        except Exception as e:
+            logger.debug(f"Error in _should_store_cache: {e}")
+            return False
 
     def _merge_kv_caches(
             self,

@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 from unittest.mock import MagicMock, patch, AsyncMock
-from xconnector.interfaces.vllm_integration import XConnectorVLLMBridge
+from xconnector.interfaces.interfaces import XConnectorVLLMBridge
 from xconnector.adapters.cache.lmcache_adapter import LMCacheAdapter
 from xconnector.core.connector import XConnector, AdapterType
 import torch
