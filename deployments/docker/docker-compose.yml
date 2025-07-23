@@ -13,6 +13,7 @@ services:
       - NATS_URL=nats://nats:4222
       - XCONNECTOR_PORT=8081
       - LOG_LEVEL=INFO
+      - PYTHONPATH=/app
     networks:
       - dynamo-network
     ports:
@@ -22,13 +23,18 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
     depends_on:
-      - etcd
-      - nats
+      etcd:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    volumes:
+      - xconnector-logs:/app/logs
 
-  # AI-Dynamo Worker (使用官方镜像)
+  # AI-Dynamo Worker (使用你提供的Dynamo镜像)
   dynamo-worker:
-    image: ${DYNAMO_IMAGE:-your-registry/ai-dynamo:latest}
+    image: ${DYNAMO_IMAGE:-ai-dynamo:latest}
     container_name: dynamo-worker
     environment:
       # XConnector 配置
@@ -38,13 +44,19 @@ services:
       - ETCD_HOST=etcd
       - ETCD_PORT=2379
       - NATS_URL=nats://nats:4222
+      # Python 路径配置
+      - PYTHONPATH=/workspace:/xconnector-integration:$PYTHONPATH
     volumes:
-      # 挂载配置文件
+      # 挂载配置文件到Dynamo工作目录
       - ./configs/disagg_xconnector_remote.yaml:/workspace/configs/disagg.yaml:ro
-      # 挂载 extension loader
+      # 挂载XConnector集成代码
       - ../../integrations/dynamo/extension_loader.py:/xconnector-integration/extension_loader.py:ro
       # 挂载启动包装脚本
       - ./dynamo-wrapper/startup-wrapper.py:/workspace/startup-wrapper.py:ro
+      # 挂载模型缓存目录
+      - model-cache:/workspace/models
+      # 挂载日志目录
+      - dynamo-logs:/workspace/logs
     networks:
       - dynamo-network
     # 使用包装脚本启动
@@ -57,17 +69,21 @@ services:
               count: 1
               capabilities: [gpu]
     depends_on:
-      - xconnector-service
-      - etcd
-      - nats
+      xconnector-service:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+      nats:
+        condition: service_started
 
-  # Frontend service
+  # Frontend service (如果需要独立的前端)
   dynamo-frontend:
-    image: ${DYNAMO_IMAGE:-your-registry/ai-dynamo:latest}
+    image: ${DYNAMO_IMAGE:-ai-dynamo:latest}
     container_name: dynamo-frontend
     environment:
       - ETCD_HOST=etcd
       - ETCD_PORT=2379
+      - PYTHONPATH=/workspace:$PYTHONPATH
     volumes:
       - ./configs/disagg_xconnector_remote.yaml:/workspace/configs/disagg.yaml:ro
     networks:
@@ -76,7 +92,8 @@ services:
       - "8000:8000"
     command: ["dynamo", "serve", "graphs.disagg:Frontend", "-f", "/workspace/configs/disagg.yaml"]
     depends_on:
-      - dynamo-worker
+      dynamo-worker:
+        condition: service_started
 
   # etcd
   etcd:
@@ -98,6 +115,12 @@ services:
       - "2380:2380"
     volumes:
       - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # NATS
   nats:
@@ -109,6 +132,11 @@ services:
       - "4222:4222"
       - "8222:8222"  # HTTP monitoring
     command: ["-js", "-m", "8222"]  # Enable JetStream
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 networks:
   dynamo-network:
@@ -119,3 +147,6 @@ networks:
 
 volumes:
   etcd-data:
+  xconnector-logs:
+  dynamo-logs:
+  model-cache:

@@ -1,3 +1,4 @@
+# deployments/docker/Dockerfile.xconnector-service
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -6,6 +7,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -13,31 +15,82 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install additional requirements for service mode
-RUN pip install fastapi uvicorn httpx
+RUN pip install fastapi uvicorn httpx etcd3-py nats-py
 
-# Copy XConnector code
+# Copy XConnector source code
 COPY xconnector/ ./xconnector/
 COPY integrations/ ./integrations/
-COPY csrc/ ./csrc/
+COPY csrc/ ./csrc/ 2>/dev/null || true
 
-# Install XConnector
+# Copy setup files
+COPY setup.py pyproject.toml ./
+
+# Install XConnector in development mode
 RUN pip install -e .
 
-# Create service runner
-RUN echo '#!/usr/bin/env python3\n\
-import os\n\
-import sys\n\
-sys.path.insert(0, "/app")\n\
-\n\
-# Run XConnector service\n\
-if __name__ == "__main__":\n\
-    import uvicorn\n\
-    from integrations.dynamo.xconnector_service import app\n\
-    \n\
-    port = int(os.getenv("XCONNECTOR_PORT", "8081"))\n\
-    uvicorn.run(app, host="0.0.0.0", port=port)\n\
-' > /app/run_service.py && chmod +x /app/run_service.py
+# Create logs directory
+RUN mkdir -p /app/logs
+
+# Create the service runner script
+RUN cat > /app/run_service.py << 'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+import asyncio
+import uvicorn
+from pathlib import Path
+
+# Add project root to Python path
+sys.path.insert(0, "/app")
+
+# Import XConnector service
+from integrations.dynamo.xconnector_service import XConnectorService
+
+# Create FastAPI app
+from fastapi import FastAPI
+
+app = FastAPI(title="XConnector Service", version="1.0.0")
+
+# Initialize XConnector service
+xconnector_service = XConnectorService()
+
+# Add health check endpoint
+@app.get("/health")
+async def health_check():
+    try:
+        status = await xconnector_service.get_status()
+        return {"status": "healthy", "xconnector": status}
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
+
+# Add XConnector endpoints
+app.mount("/xconnector", xconnector_service.app)
+
+if __name__ == "__main__":
+    port = int(os.getenv("XCONNECTOR_PORT", "8081"))
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
+
+    # Configure logging
+    import logging
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper()),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level=log_level
+    )
+EOF
+
+RUN chmod +x /app/run_service.py
 
 EXPOSE 8081
+
+# Set environment variables
+ENV PYTHONPATH="/app:$PYTHONPATH"
+ENV XCONNECTOR_HOME="/app"
 
 CMD ["python", "/app/run_service.py"]
