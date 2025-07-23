@@ -185,24 +185,35 @@ class XConnector:
             self._setup_health_check()
 
     def _register_builtin_adapters(self):
-        """注册内置适配器"""
-        builtin_adapters = [
-            AdapterConfig(
-                name="vllm",
-                type=AdapterType.INFERENCE,
-                class_path="xconnector.adapters.inference.vllm_adapter.VLLMAdapter",
-                config=self.config.vllm_config
-            ),
-            AdapterConfig(
-                name="lmcache",
-                type=AdapterType.CACHE,
-                class_path="xconnector.adapters.cache.lmcache_adapter.LMCacheAdapter",
-                config=self.config.lmcache_config
-            )
-        ]
+        """注册内置适配器（仅注册到插件管理器，不实际加载）"""
+        try:
+            # 只注册适配器配置，不传入具体配置
+            # 具体配置由各适配器自己处理
+            builtin_adapters = [
+                AdapterConfig(
+                    name="vllm",
+                    type=AdapterType.INFERENCE,
+                    class_path="xconnector.adapters.inference.vllm_adapter.VLLMAdapter",
+                    config={},  # 空配置，由适配器自己处理
+                    enabled=False  # 默认不启用，需要手动加载
+                ),
+                AdapterConfig(
+                    name="lmcache",
+                    type=AdapterType.CACHE,
+                    class_path="xconnector.adapters.cache.lmcache_adapter.LMCacheAdapter",
+                    config={},  # 空配置，由适配器自己处理
+                    enabled=False  # 默认不启用，需要手动加载
+                )
+            ]
 
-        for adapter_config in builtin_adapters:
-            self.plugin_manager.register_adapter(adapter_config)
+            # 只注册到插件管理器，不实际加载
+            for adapter_config in builtin_adapters:
+                self.plugin_manager.register_adapter(adapter_config)
+
+            logger.debug("Registered builtin adapters to plugin manager")
+
+        except Exception as e:
+            logger.warning(f"Failed to register builtin adapters: {e}")
 
     def _setup_routing_rules(self):
         """设置路由规则"""
