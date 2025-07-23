@@ -1,25 +1,61 @@
-# xconnector/integration/dynamo/xconnector_service.py
+# integrations/dynamo/xconnector_service.py
 """
 XConnector Service for AI-Dynamo
 
-Provides a centralized XConnector service that can be deployed
-as a Dynamo component for managing adapters and routing.
+Fixed version with proper FastAPI integration and standalone service capability.
 """
 
 import asyncio
 import json
+import os
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException
+from datetime import datetime
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
+import logging
 
-from dynamo.sdk import service, endpoint, depends, async_on_start
-from dynamo.sdk.lib.config import ServiceConfig
-from dynamo.runtime import EtcdKvCache
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-from xconnector.core.connector import XConnector, AdapterConfig, AdapterType
-from xconnector.utils.xconnector_logging import get_logger
+try:
+    from xconnector.core.connector import XConnector, AdapterConfig, AdapterType
+    from xconnector.utils.config import ConnectorConfig
+    from xconnector.utils.xconnector_logging import get_logger
+except ImportError as e:
+    logger.warning(f"XConnector import failed: {e}, running in mock mode")
 
-logger = get_logger(__name__)
+
+    # Mock classes for testing without XConnector
+    class XConnector:
+        def __init__(self, *args, **kwargs): pass
+
+        async def start(self): pass
+
+        async def stop(self): pass
+
+        async def get_health_status(self): return {"status": "mock"}
+
+        def list_adapters(self): return {"inference": [], "cache": [], "distributed": []}
+
+
+    class AdapterConfig:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+
+    class AdapterType:
+        INFERENCE = "inference"
+        CACHE = "cache"
+        DISTRIBUTED = "distributed"
+
+
+    class ConnectorConfig:
+        def __init__(self): pass
 
 
 # === Request/Response Models ===
@@ -50,322 +86,264 @@ class HealthCheckResponse(BaseModel):
 
 # === XConnector Service ===
 
-@service(
-    dynamo={
-        "namespace": "xconnector",
-        "replicas": 1,
-    },
-    resources={"cpu": "2", "memory": "4Gi"},
-    workers=1,
-    app=FastAPI(title="XConnector Service", version="1.0.0")
-)
 class XConnectorService:
     """
-    XConnector management service for Dynamo
+    Standalone XConnector service for AI-Dynamo integration
 
     Provides centralized adapter management and routing coordination
-    for distributed inference workloads.
+    without requiring Dynamo SDK dependencies.
     """
 
     def __init__(self):
-        # Load configuration
-        self.service_config = ServiceConfig.get_parsed_config("XConnectorService")
+        # Load configuration from environment or config file
+        self.config = self._load_config()
 
         # Initialize XConnector
-        self.connector = XConnector(self.service_config)
+        try:
+            self.connector = XConnector(self.config)
+        except Exception as e:
+            logger.error(f"Failed to initialize XConnector: {e}")
+            self.connector = None
 
         # Service metadata
-        self.namespace = None
-        self.component_name = None
-        self.config_cache = None
+        self.service_id = f"xconnector-service-{os.getpid()}"
+        self.start_time = datetime.now()
 
         # Adapter registry
         self.adapter_registry = {}
 
+        # Create FastAPI app
+        self.app = FastAPI(title="XConnector Service", version="1.0.0")
+        self._setup_routes()
+
         logger.info("XConnectorService initialized")
 
-    @async_on_start
-    async def initialize(self):
-        """Initialize service using Dynamo lifecycle hook"""
+    def _load_config(self) -> ConnectorConfig:
+        """Load configuration from file or environment"""
         try:
-            # Get Dynamo context
-            from dynamo.sdk import dynamo_context
+            config_file = os.getenv("XCONNECTOR_CONFIG", "/app/configs/xconnector_config.yaml")
 
-            runtime = dynamo_context["runtime"]
-            self.namespace, self.component_name = self.__class__.dynamo_address()
+            if os.path.exists(config_file):
+                logger.info(f"Loading config from: {config_file}")
+                # Load YAML config if available
+                try:
+                    import yaml
+                    with open(config_file, 'r') as f:
+                        config_data = yaml.safe_load(f)
+                    return self._dict_to_config(config_data)
+                except Exception as e:
+                    logger.warning(f"Failed to load config file: {e}")
 
-            # Initialize configuration cache
-            self.config_cache = await EtcdKvCache.create(
-                runtime.etcd_client(),
-                f"/{self.namespace}/config/",
-                self._get_default_config()
-            )
-
-            # Load pre-configured adapters
-            await self._load_default_adapters()
-
-            # Start XConnector
-            await self.connector.start()
-
-            # Start configuration watcher
-            asyncio.create_task(self._watch_config_changes())
-
-            # Register service in etcd
-            await self._register_service(runtime)
-
-            logger.info(f"XConnectorService started at {self.namespace}.{self.component_name}")
+            # Use default config
+            return ConnectorConfig()
 
         except Exception as e:
-            logger.error(f"Failed to initialize XConnectorService: {e}")
+            logger.error(f"Error loading config: {e}")
+            return ConnectorConfig()
+
+    def _dict_to_config(self, config_data: Dict[str, Any]) -> ConnectorConfig:
+        """Convert dictionary to ConnectorConfig"""
+        config = ConnectorConfig()
+
+        # Load adapter configurations
+        if 'adapters' in config_data:
+            adapters = []
+            for name, adapter_data in config_data['adapters'].items():
+                adapter_config = AdapterConfig(
+                    name=name,
+                    type=adapter_data.get('type', 'inference'),
+                    class_path=adapter_data.get('class_path', ''),
+                    config=adapter_data.get('config', {}),
+                    enabled=adapter_data.get('enabled', True)
+                )
+                adapters.append(adapter_config)
+            config.adapters = adapters
+
+        return config
+
+    def _setup_routes(self):
+        """Setup FastAPI routes"""
+
+        @self.app.get("/health")
+        async def health_check():
+            """Health check endpoint"""
+            return await self.get_status()
+
+        @self.app.get("/status")
+        async def get_status():
+            """Get service status"""
+            return await self.get_status()
+
+        @self.app.get("/adapters")
+        async def list_adapters():
+            """List all adapters"""
+            return await self.list_adapters()
+
+        @self.app.post("/adapters")
+        async def register_adapter(request: AdapterRegistrationRequest):
+            """Register new adapter"""
+            return await self.register_adapter(request)
+
+        @self.app.delete("/adapters/{adapter_name}")
+        async def unregister_adapter(adapter_name: str, adapter_type: str):
+            """Unregister adapter"""
+            return await self.unregister_adapter(adapter_name, adapter_type)
+
+        @self.app.post("/route")
+        async def route_request(request: RouteRequest):
+            """Route request through XConnector"""
+            return await self.route_request(request)
+
+        @self.app.get("/adapters/{adapter_name}")
+        async def get_adapter_info(adapter_name: str):
+            """Get adapter information"""
+            return await self.get_adapter_info(adapter_name)
+
+    # === Service Methods ===
+
+    async def start(self):
+        """Start XConnector service"""
+        try:
+            if self.connector:
+                # Load pre-configured adapters
+                await self._load_default_adapters()
+
+                # Start XConnector
+                await self.connector.start()
+
+            logger.info(f"XConnectorService started: {self.service_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to start XConnectorService: {e}")
             raise
 
-    def _get_default_config(self) -> Dict[str, Any]:
-        """Get default configuration"""
-        return {
-            "adapters": {
-                "vllm": {
-                    "enabled": True,
-                    "class_path": "xconnector.adapters.inference.vllm_adapter.VLLMAdapter",
-                    "config": {
-                        "model_name": "",
-                        "tensor_parallel_size": 1,
-                        "enable_prefix_caching": True
-                    }
-                },
-                "lmcache": {
-                    "enabled": True,
-                    "class_path": "xconnector.adapters.cache.lmcache_adapter.LMCacheAdapter",
-                    "config": {
-                        "storage_backend": "local",
-                        "max_cache_size": 1024,
-                        "enable_compression": True
-                    }
-                },
-                "dynamo": {
-                    "enabled": True,
-                    "class_path": "xconnector.adapters.distributed.dynamo_adapter.DynamoAdapter",
-                    "config": {
-                        "namespace": "dynamo",
-                        "routing_policy": {
-                            "strategy": "least_loaded"
-                        }
-                    }
-                }
-            },
-            "routing": {
-                "inference_to_cache": {
-                    "enabled": True,
-                    "timeout": 30.0,
-                    "retry_count": 2
-                },
-                "cache_to_inference": {
-                    "enabled": True,
-                    "timeout": 30.0
-                }
-            },
-            "monitoring": {
-                "metrics_enabled": True,
-                "health_check_interval": 30
-            }
-        }
+    async def stop(self):
+        """Stop XConnector service"""
+        try:
+            if self.connector:
+                await self.connector.stop()
+
+            logger.info(f"XConnectorService stopped: {self.service_id}")
+
+        except Exception as e:
+            logger.error(f"Error stopping XConnectorService: {e}")
 
     async def _load_default_adapters(self):
         """Load default adapters from configuration"""
-        config = await self.config_cache.get("adapters")
+        if not self.connector:
+            return
 
-        for adapter_name, adapter_config in config.items():
-            if adapter_config.get("enabled", True):
+        for adapter_config in self.config.adapters:
+            if adapter_config.enabled:
                 try:
-                    # Determine adapter type
-                    adapter_type = self._infer_adapter_type(adapter_name, adapter_config["class_path"])
-
-                    # Create adapter configuration
-                    config = AdapterConfig(
-                        name=adapter_name,
-                        type=adapter_type,
-                        class_path=adapter_config["class_path"],
-                        config=adapter_config.get("config", {})
-                    )
-
                     # Load adapter
-                    await self.connector.load_adapter(config)
-
-                    # Store in registry
-                    self.adapter_registry[adapter_name] = {
-                        "type": adapter_type.value,
-                        "config": config,
-                        "loaded_at": asyncio.get_event_loop().time()
-                    }
-
-                    logger.info(f"Loaded adapter: {adapter_name}")
-
-                except Exception as e:
-                    logger.error(f"Failed to load adapter {adapter_name}: {e}")
-
-    def _infer_adapter_type(self, name: str, class_path: str) -> AdapterType:
-        """Infer adapter type from name and class path"""
-        name_lower = name.lower()
-        path_lower = class_path.lower()
-
-        if "inference" in path_lower or any(x in name_lower for x in ["vllm", "tgi", "llm"]):
-            return AdapterType.INFERENCE
-        elif "cache" in path_lower or any(x in name_lower for x in ["cache", "redis"]):
-            return AdapterType.CACHE
-        elif "distributed" in path_lower or any(x in name_lower for x in ["dynamo", "distributed"]):
-            return AdapterType.DISTRIBUTED
-        else:
-            return AdapterType.INFERENCE  # Default
-
-    async def _watch_config_changes(self):
-        """Watch for configuration changes in etcd"""
-        try:
-            async for key, value in self.config_cache.watch_iter():
-                logger.info(f"Configuration changed: {key}")
-
-                # Handle adapter configuration changes
-                if key.startswith("adapters/"):
-                    adapter_name = key.split("/")[1]
-                    await self._handle_adapter_config_change(adapter_name, value)
-
-        except Exception as e:
-            logger.error(f"Config watcher error: {e}")
-
-    async def _handle_adapter_config_change(self, adapter_name: str, config: Dict[str, Any]):
-        """Handle adapter configuration changes"""
-        try:
-            # Check if adapter exists
-            if adapter_name in self.adapter_registry:
-                # Update existing adapter
-                adapter_type = AdapterType(self.adapter_registry[adapter_name]["type"])
-                adapter = self.connector.get_adapter(adapter_name, adapter_type)
-
-                if adapter and hasattr(adapter, "update_config"):
-                    adapter.update_config(config.get("config", {}))
-                    logger.info(f"Updated configuration for adapter: {adapter_name}")
-            else:
-                # Load new adapter
-                if config.get("enabled", True):
-                    adapter_type = self._infer_adapter_type(adapter_name, config["class_path"])
-
-                    adapter_config = AdapterConfig(
-                        name=adapter_name,
-                        type=adapter_type,
-                        class_path=config["class_path"],
-                        config=config.get("config", {})
-                    )
-
                     await self.connector.load_adapter(adapter_config)
 
-                    self.adapter_registry[adapter_name] = {
-                        "type": adapter_type.value,
+                    # Store in registry
+                    self.adapter_registry[adapter_config.name] = {
+                        "type": adapter_config.type,
                         "config": adapter_config,
-                        "loaded_at": asyncio.get_event_loop().time()
+                        "loaded_at": datetime.now().isoformat()
                     }
 
-                    logger.info(f"Loaded new adapter: {adapter_name}")
+                    logger.info(f"Loaded adapter: {adapter_config.name}")
 
-        except Exception as e:
-            logger.error(f"Failed to handle adapter config change: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to load adapter {adapter_config.name}: {e}")
 
-    async def _register_service(self, runtime):
-        """Register service in etcd for discovery"""
+    # === API Endpoints ===
+
+    async def get_status(self) -> Dict[str, Any]:
+        """Get service status"""
         try:
-            service_info = {
-                "namespace": self.namespace,
-                "component": self.component_name,
-                "endpoints": [
-                    "get_status",
-                    "list_adapters",
-                    "register_adapter",
-                    "unregister_adapter",
-                    "route_request"
-                ],
-                "version": "1.0.0"
+            status = {
+                "service": {
+                    "id": self.service_id,
+                    "status": "healthy",
+                    "start_time": self.start_time.isoformat(),
+                    "uptime_seconds": (datetime.now() - self.start_time).total_seconds()
+                },
+                "xconnector": {
+                    "available": self.connector is not None,
+                    "status": "unknown"
+                }
             }
 
-            key = f"/{self.namespace}/services/xconnector"
-            await runtime.etcd_client().put(key, json.dumps(service_info))
+            if self.connector:
+                try:
+                    health_status = await self.connector.get_health_status()
+                    status["xconnector"]["status"] = health_status.get("connector", {}).get("status", "unknown")
+                    status["xconnector"]["details"] = health_status
+                except Exception as e:
+                    status["xconnector"]["status"] = "error"
+                    status["xconnector"]["error"] = str(e)
+
+            return status
 
         except Exception as e:
-            logger.error(f"Failed to register service: {e}")
+            logger.error(f"Status check failed: {e}")
+            return {
+                "service": {"status": "error", "error": str(e)},
+                "xconnector": {"available": False, "status": "error"}
+            }
 
-    # === Endpoints ===
-
-    @endpoint()
-    async def get_status(self) -> HealthCheckResponse:
-        """Get XConnector service status"""
-        try:
-            health_status = await self.connector.get_health_status()
-
-            return HealthCheckResponse(
-                status="healthy" if health_status["connector"]["status"] == "healthy" else "unhealthy",
-                timestamp=asyncio.get_event_loop().time(),
-                details=health_status
-            )
-
-        except Exception as e:
-            logger.error(f"Health check failed: {e}")
-            return HealthCheckResponse(
-                status="error",
-                timestamp=asyncio.get_event_loop().time(),
-                details={"error": str(e)}
-            )
-
-    @endpoint()
     async def list_adapters(self) -> Dict[str, Any]:
         """List all loaded adapters"""
-        adapters = self.connector.list_adapters()
+        try:
+            if not self.connector:
+                return {"adapters": {}, "registry": self.adapter_registry}
 
-        # Add registry information
-        detailed_info = {}
-        for adapter_type, adapter_list in adapters.items():
-            detailed_info[adapter_type] = []
+            adapters = self.connector.list_adapters()
 
-            for adapter_name in adapter_list:
-                info = {
-                    "name": adapter_name,
-                    "loaded": adapter_name in self.adapter_registry
-                }
+            # Add registry information
+            detailed_info = {}
+            for adapter_type, adapter_list in adapters.items():
+                detailed_info[adapter_type] = []
 
-                if adapter_name in self.adapter_registry:
-                    info.update(self.adapter_registry[adapter_name])
+                for adapter_name in adapter_list:
+                    info = {
+                        "name": adapter_name,
+                        "loaded": adapter_name in self.adapter_registry
+                    }
 
-                detailed_info[adapter_type].append(info)
+                    if adapter_name in self.adapter_registry:
+                        info.update(self.adapter_registry[adapter_name])
 
-        return detailed_info
+                    detailed_info[adapter_type].append(info)
 
-    @endpoint()
+            return {
+                "adapters": detailed_info,
+                "registry": self.adapter_registry
+            }
+
+        except Exception as e:
+            logger.error(f"List adapters failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     async def register_adapter(self, request: AdapterRegistrationRequest) -> Dict[str, Any]:
         """Register a new adapter"""
         try:
+            if not self.connector:
+                raise HTTPException(status_code=503, detail="XConnector not available")
+
             # Create adapter configuration
             adapter_config = AdapterConfig(
                 name=request.name,
-                type=AdapterType(request.type),
+                type=request.type,
                 class_path=request.class_path,
                 config=request.config,
                 enabled=request.enabled
             )
 
             # Load adapter
-            adapter = await self.connector.load_adapter(adapter_config)
+            await self.connector.load_adapter(adapter_config)
 
             # Update registry
             self.adapter_registry[request.name] = {
                 "type": request.type,
                 "config": adapter_config,
-                "loaded_at": asyncio.get_event_loop().time()
+                "loaded_at": datetime.now().isoformat()
             }
-
-            # Persist to etcd
-            await self.config_cache.set(
-                f"adapters/{request.name}",
-                {
-                    "enabled": request.enabled,
-                    "class_path": request.class_path,
-                    "config": request.config
-                }
-            )
 
             return {
                 "status": "success",
@@ -377,22 +355,29 @@ class XConnectorService:
             logger.error(f"Failed to register adapter: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    @endpoint()
     async def unregister_adapter(self, adapter_name: str, adapter_type: str) -> Dict[str, Any]:
         """Unregister an adapter"""
         try:
+            if not self.connector:
+                raise HTTPException(status_code=503, detail="XConnector not available")
+
+            # Convert string to AdapterType
+            type_mapping = {
+                "inference": AdapterType.INFERENCE,
+                "cache": AdapterType.CACHE,
+                "distributed": AdapterType.DISTRIBUTED
+            }
+
+            adapter_type_enum = type_mapping.get(adapter_type)
+            if not adapter_type_enum:
+                raise HTTPException(status_code=400, detail=f"Invalid adapter type: {adapter_type}")
+
             # Unload adapter
-            adapter = self.connector.unload_adapter(adapter_name, AdapterType(adapter_type))
+            adapter = self.connector.unload_adapter(adapter_name, adapter_type_enum)
 
             if adapter:
                 # Remove from registry
                 self.adapter_registry.pop(adapter_name, None)
-
-                # Update etcd
-                await self.config_cache.set(
-                    f"adapters/{adapter_name}/enabled",
-                    False
-                )
 
                 return {
                     "status": "success",
@@ -408,10 +393,12 @@ class XConnectorService:
             logger.error(f"Failed to unregister adapter: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    @endpoint()
     async def route_request(self, request: RouteRequest) -> Dict[str, Any]:
         """Route a request through XConnector"""
         try:
+            if not self.connector:
+                raise HTTPException(status_code=503, detail="XConnector not available")
+
             result = await self.connector.route_message(
                 source=request.source,
                 target=request.target,
@@ -431,45 +418,123 @@ class XConnectorService:
                 "error": str(e)
             }
 
-    @endpoint()
     async def get_adapter_info(self, adapter_name: str) -> Dict[str, Any]:
         """Get detailed information about a specific adapter"""
-        # Check all adapter types
-        for adapter_type in [AdapterType.INFERENCE, AdapterType.CACHE, AdapterType.DISTRIBUTED]:
-            adapter = self.connector.get_adapter(adapter_name, adapter_type)
-            if adapter:
-                info = adapter.get_info()
-                info["registry_info"] = self.adapter_registry.get(adapter_name, {})
-                return info
-
-        raise HTTPException(status_code=404, detail=f"Adapter {adapter_name} not found")
-
-    @endpoint()
-    async def update_routing_policy(self, policy: Dict[str, Any]) -> Dict[str, Any]:
-        """Update routing policy for Dynamo adapter"""
         try:
-            dynamo_adapter = self.connector.get_adapter("dynamo", AdapterType.DISTRIBUTED)
+            if not self.connector:
+                raise HTTPException(status_code=503, detail="XConnector not available")
 
-            if dynamo_adapter and hasattr(dynamo_adapter, "update_routing_policy"):
-                success = dynamo_adapter.update_routing_policy(policy)
+            # Check all adapter types
+            for adapter_type in [AdapterType.INFERENCE, AdapterType.CACHE, AdapterType.DISTRIBUTED]:
+                adapter = self.connector.get_adapter(adapter_name, adapter_type)
+                if adapter:
+                    info = adapter.get_info() if hasattr(adapter, 'get_info') else {"name": adapter_name}
+                    info["registry_info"] = self.adapter_registry.get(adapter_name, {})
+                    return info
 
-                if success:
-                    # Persist to etcd
-                    await self.config_cache.set(
-                        "adapters/dynamo/config/routing_policy",
-                        policy
-                    )
+            raise HTTPException(status_code=404, detail=f"Adapter {adapter_name} not found")
 
-                    return {
-                        "status": "success",
-                        "message": "Routing policy updated successfully"
-                    }
-
-            return {
-                "status": "error",
-                "message": "Dynamo adapter not found or does not support policy updates"
-            }
-
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Failed to update routing policy: {e}")
+            logger.error(f"Get adapter info failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+
+# === Standalone Service Runner ===
+
+async def create_service():
+    """Create and start XConnector service"""
+    service = XConnectorService()
+    await service.start()
+    return service
+
+
+# Global service instance
+_service_instance = None
+
+
+async def get_service():
+    """Get service instance"""
+    global _service_instance
+    if _service_instance is None:
+        _service_instance = await create_service()
+    return _service_instance
+
+
+# Create FastAPI app for standalone use
+app = FastAPI(title="XConnector Service", version="1.0.0")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Startup event handler"""
+    logger.info("Starting XConnector service...")
+    await get_service()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Shutdown event handler"""
+    logger.info("Stopping XConnector service...")
+    global _service_instance
+    if _service_instance:
+        await _service_instance.stop()
+
+
+# Mount service routes
+@app.get("/health")
+async def health_check():
+    service = await get_service()
+    return await service.get_status()
+
+
+@app.get("/status")
+async def get_status():
+    service = await get_service()
+    return await service.get_status()
+
+
+@app.get("/adapters")
+async def list_adapters():
+    service = await get_service()
+    return await service.list_adapters()
+
+
+@app.post("/adapters")
+async def register_adapter(request: AdapterRegistrationRequest):
+    service = await get_service()
+    return await service.register_adapter(request)
+
+
+@app.delete("/adapters/{adapter_name}")
+async def unregister_adapter(adapter_name: str, adapter_type: str):
+    service = await get_service()
+    return await service.unregister_adapter(adapter_name, adapter_type)
+
+
+@app.post("/route")
+async def route_request(request: RouteRequest):
+    service = await get_service()
+    return await service.route_request(request)
+
+
+@app.get("/adapters/{adapter_name}")
+async def get_adapter_info(adapter_name: str):
+    service = await get_service()
+    return await service.get_adapter_info(adapter_name)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("XCONNECTOR_PORT", "8081"))
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
+
+    uvicorn.run(
+        "integrations.dynamo.xconnector_service:app",
+        host="0.0.0.0",
+        port=port,
+        log_level=log_level,
+        reload=False
+    )
