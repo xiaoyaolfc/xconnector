@@ -1,11 +1,9 @@
 version: '3.8'
 
 services:
-  # XConnector 独立服务
+  # XConnector 独立服务 - 使用你已有的镜像
   xconnector-service:
-    build:
-      context: ../..
-      dockerfile: deployments/docker/Dockerfile.xconnector-service
+    image: xconnector-service:latest  # 使用你已有的镜像，不再构建
     container_name: xconnector-service
     environment:
       - ETCD_HOST=etcd
@@ -31,10 +29,60 @@ services:
         condition: service_started
     volumes:
       - xconnector-logs:/app/logs
+      # 如果需要自定义配置，取消下面的注释
+      # - ./configs/xconnector_config.yaml:/app/configs/xconnector_config.yaml:ro
+    restart: unless-stopped
 
-  # AI-Dynamo Worker (使用你提供的Dynamo镜像)
+  # etcd - 使用你已有的 bitnami 镜像
+  etcd:
+    image: bitnami/etcd:auth-online  # 使用你已有的镜像
+    container_name: etcd
+    environment:
+      # Bitnami etcd 的环境变量配置
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER=etcd=http://etcd:2380
+      - ETCD_NAME=etcd
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER_STATE=new
+    networks:
+      - dynamo-network
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - etcd-data:/bitnami/etcd/data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # NATS - 使用你已有的 latest 镜像
+  nats:
+    image: nats:latest  # 使用你已有的镜像
+    container_name: nats
+    networks:
+      - dynamo-network
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # HTTP monitoring
+    command: ["-js", "-m", "8222"]  # Enable JetStream
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # AI-Dynamo Worker
   dynamo-worker:
-    image: ${DYNAMO_IMAGE:-ai-dynamo:latest}
+    image: dynamo:latest-vllm  # 使用你的 dynamo 镜像
     container_name: dynamo-worker
     environment:
       # XConnector 配置
@@ -47,11 +95,9 @@ services:
       # Python 路径配置
       - PYTHONPATH=/workspace:/xconnector-integration:$PYTHONPATH
     volumes:
-      # 挂载配置文件到Dynamo工作目录
+      # 挂载配置文件到 Dynamo 工作目录
       - ./configs/disagg_xconnector_remote.yaml:/workspace/configs/disagg.yaml:ro
-      # 挂载XConnector集成代码
-      - ../../integrations/dynamo/extension_loader.py:/xconnector-integration/extension_loader.py:ro
-      # 挂载启动包装脚本
+      # 挂载启动包装脚本（如果需要 XConnector 集成）
       - ./dynamo-wrapper/startup-wrapper.py:/workspace/startup-wrapper.py:ro
       # 挂载模型缓存目录
       - model-cache:/workspace/models
@@ -59,7 +105,7 @@ services:
       - dynamo-logs:/workspace/logs
     networks:
       - dynamo-network
-    # 使用包装脚本启动
+    # 使用包装脚本启动（如果需要 XConnector 集成）
     command: ["python", "/workspace/startup-wrapper.py", "serve", "graphs.disagg:Frontend", "-f", "/workspace/configs/disagg.yaml"]
     deploy:
       resources:
@@ -75,10 +121,11 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+    restart: unless-stopped
 
-  # Frontend service (如果需要独立的前端)
+  # Frontend service
   dynamo-frontend:
-    image: ${DYNAMO_IMAGE:-ai-dynamo:latest}
+    image: dynamo:latest-vllm  # 使用你的 dynamo 镜像
     container_name: dynamo-frontend
     environment:
       - ETCD_HOST=etcd
@@ -94,49 +141,7 @@ services:
     depends_on:
       dynamo-worker:
         condition: service_started
-
-  # etcd
-  etcd:
-    image: quay.io/coreos/etcd:v3.5.9
-    container_name: etcd
-    environment:
-      - ETCD_NAME=etcd0
-      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
-      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
-      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
-      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
-      - ETCD_INITIAL_CLUSTER=etcd0=http://etcd:2380
-      - ETCD_INITIAL_CLUSTER_STATE=new
-      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
-    networks:
-      - dynamo-network
-    ports:
-      - "2379:2379"
-      - "2380:2380"
-    volumes:
-      - etcd-data:/etcd-data
-    healthcheck:
-      test: ["CMD", "etcdctl", "endpoint", "health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # NATS
-  nats:
-    image: nats:2.10-alpine
-    container_name: nats
-    networks:
-      - dynamo-network
-    ports:
-      - "4222:4222"
-      - "8222:8222"  # HTTP monitoring
-    command: ["-js", "-m", "8222"]  # Enable JetStream
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    restart: unless-stopped
 
 networks:
   dynamo-network:
