@@ -27,3 +27,7 @@ xconnector-recovered-backup/
 logs/
 log/
 /xconnector/utils/xconnector/
+
+# docker排除
+docker-images/
+xconnector-deployment-20250723_143424/
