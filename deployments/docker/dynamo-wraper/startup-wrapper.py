@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Startup wrapper for AI-Dynamo with XConnector extension
-This script wraps the original dynamo startup to inject XConnector
+XConnector-Dynamo Integration Startup Wrapper
+用于在 Dynamo 启动时注入 XConnector 扩展
 """
 
-import sys
 import os
+import sys
 import time
-import importlib.util
 import logging
+import requests
+from pathlib import Path
 
-# Configure logging
+# 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -19,193 +20,173 @@ logger = logging.getLogger(__name__)
 
 
 def wait_for_xconnector_service():
-    """Wait for XConnector service to be ready"""
-    import requests
-
+    """等待 XConnector 服务准备就绪"""
     service_url = os.getenv("XCONNECTOR_SERVICE_URL", "http://xconnector-service:8081")
     max_retries = 30
     retry_delay = 2
+
+    logger.info(f"Waiting for XConnector service at {service_url}")
 
     for i in range(max_retries):
         try:
             response = requests.get(f"{service_url}/health", timeout=5)
             if response.status_code == 200:
-                logger.info("XConnector service is ready")
+                logger.info("✓ XConnector service is ready")
                 return True
         except Exception as e:
             logger.info(f"Waiting for XConnector service... ({i + 1}/{max_retries}): {e}")
             time.sleep(retry_delay)
 
-    logger.warning("XConnector service not ready, continuing anyway")
+    logger.warning("⚠ XConnector service not ready, continuing anyway")
     return False
 
 
-def inject_xconnector():
-    """Inject XConnector extension loader into Python path and patch Worker"""
+def create_xconnector_extension():
+    """创建 XConnector 扩展文件"""
+    extension_content = '''
+import os
+import sys
+import logging
+import requests
+from typing import Any, Dict, Optional, Callable
 
-    # Wait for XConnector service
-    if os.getenv("ENABLE_XCONNECTOR", "").lower() == "true":
-        logger.info("XConnector enabled, waiting for service...")
-        wait_for_xconnector_service()
+logger = logging.getLogger(__name__)
 
-    # Add extension loader to Python path
-    extension_loader_path = "/xconnector-integration/extension_loader.py"
+class RemoteXConnectorExtension:
+    """远程 XConnector 扩展"""
 
-    if os.path.exists(extension_loader_path):
+    def __init__(self, service_url: str):
+        self.service_url = service_url
+        self.enabled = True
+
+    async def route_message(self, source: str, target: str, method: str, **kwargs) -> Any:
+        """通过远程 XConnector 服务路由消息"""
         try:
-            # Load the extension loader module
-            spec = importlib.util.spec_from_file_location("xconnector_extension", extension_loader_path)
-            extension_module = importlib.util.module_from_spec(spec)
-            sys.modules["xconnector_extension"] = extension_module
-            spec.loader.exec_module(extension_module)
+            response = requests.post(
+                f"{self.service_url}/route",
+                json={
+                    "source": source,
+                    "target": target,
+                    "method": method,
+                    "params": kwargs
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
 
-            logger.info("[XConnector] Extension loader imported successfully")
-
-            # Monkey patch the VllmWorker
-            patch_vllm_worker()
+            if result.get("status") == "success":
+                return result.get("result")
+            else:
+                raise Exception(result.get("error", "Unknown error"))
 
         except Exception as e:
-            logger.error(f"[XConnector] Failed to load extension: {e}")
-            if os.getenv("XCONNECTOR_FAIL_ON_ERROR", "false").lower() == "true":
-                raise
-    else:
-        logger.warning("[XConnector] Extension loader not found, running without XConnector")
+            logger.error(f"Remote routing failed: {e}")
+            # 返回空结果而不是抛出异常，避免中断 Dynamo
+            return {"found": False}
 
+class ExtensionLoader:
+    """扩展加载器"""
 
-def patch_vllm_worker():
-    """Monkey patch VllmWorker to load XConnector extension"""
-    try:
-        # Wait for the Dynamo modules to be available
-        max_attempts = 10
-        worker_class = None
+    _extensions = {}
 
-        for attempt in range(max_attempts):
-            try:
-                # Try different possible import paths for VllmWorker
-                import_paths = [
-                    "components.worker",
-                    "vllm_v0.components.worker",
-                    "examples.vllm_v0.components.worker",
-                    "worker"
-                ]
+    @classmethod
+    def load_extensions(cls, config: Dict[str, Any]) -> Dict[str, Any]:
+        """加载扩展"""
+        if os.getenv("ENABLE_XCONNECTOR", "").lower() == "true":
+            service_url = os.getenv("XCONNECTOR_SERVICE_URL", "http://xconnector-service:8081")
+            extension = RemoteXConnectorExtension(service_url)
+            cls._extensions["xconnector"] = extension
+            logger.info(f"Loaded XConnector extension (remote mode): {service_url}")
 
-                for import_path in import_paths:
-                    try:
-                        module = importlib.import_module(import_path)
-                        if hasattr(module, 'VllmWorker'):
-                            worker_class = getattr(module, 'VllmWorker')
-                            logger.info(f"[XConnector] Found VllmWorker in {import_path}")
-                            break
-                    except ImportError:
-                        continue
+        return cls._extensions
 
-                if worker_class:
-                    break
+    @classmethod
+    def get_extension(cls, name: str) -> Optional[Any]:
+        """获取扩展"""
+        return cls._extensions.get(name)
 
-                time.sleep(1)
+    @classmethod
+    def inject_into_worker(cls, worker_instance: Any) -> None:
+        """注入扩展到 worker"""
+        xconnector_ext = cls.get_extension("xconnector")
+        if xconnector_ext:
+            worker_instance.xconnector = xconnector_ext
+            worker_instance.xconnector_enabled = True
+            worker_instance.xconnector_mode = "remote"
 
-            except ImportError:
-                if attempt < max_attempts - 1:
-                    time.sleep(1)
-                    continue
-                else:
-                    logger.warning("[XConnector] Failed to import VllmWorker after multiple attempts")
-                    return
-
-        if not worker_class:
-            logger.warning("[XConnector] VllmWorker not found in any expected location")
-            return
-
-        # Store original init
-        original_init = worker_class.__init__
-
-        # Create wrapped init
-        def wrapped_init(self, *args, **kwargs):
-            # Call original init
-            original_init(self, *args, **kwargs)
-
-            # Load XConnector extension only if enabled
-            if os.getenv("ENABLE_XCONNECTOR", "").lower() == "true":
-                logger.info("[XConnector] Loading extension for VllmWorker")
-                try:
-                    from xconnector_extension import ExtensionLoader
-
-                    # Get config from self
-                    config = getattr(self, 'config', {})
-                    if hasattr(config, '__dict__'):
-                        config = config.__dict__
-
-                    # Add XConnector service configuration
-                    if 'extensions' not in config:
-                        config['extensions'] = {}
-
-                    if 'xconnector' not in config['extensions']:
-                        config['extensions']['xconnector'] = {}
-
-                    # Configure remote mode
-                    config['extensions']['xconnector'].update({
-                        'enabled': True,
-                        'service_mode': 'remote',
-                        'service_url': os.getenv("XCONNECTOR_SERVICE_URL", "http://xconnector-service:8081"),
-                        'fail_on_error': os.getenv("XCONNECTOR_FAIL_ON_ERROR", "false").lower() == "true"
-                    })
-
-                    ExtensionLoader.load_extensions(config)
-                    ExtensionLoader.inject_into_worker(self)
-                    logger.info("[XConnector] Extension loaded successfully")
-
-                except Exception as e:
-                    logger.error(f"[XConnector] Failed to load extension: {e}")
-                    if os.getenv("XCONNECTOR_FAIL_ON_ERROR", "false").lower() == "true":
-                        raise
-            else:
-                logger.info("[XConnector] XConnector disabled, skipping extension loading")
-
-        # Replace init
-        worker_class.__init__ = wrapped_init
-        logger.info("[XConnector] VllmWorker patched successfully")
-
-    except Exception as e:
-        logger.error(f"[XConnector] Failed to patch VllmWorker: {e}")
-        if os.getenv("XCONNECTOR_FAIL_ON_ERROR", "false").lower() == "true":
-            raise
-
-
-# Inject XConnector before starting Dynamo
-logger.info("[XConnector] Starting injection process...")
-inject_xconnector()
-logger.info("[XConnector] Injection process completed")
-
-# Continue with normal Dynamo execution
-if __name__ == "__main__":
-    logger.info("Starting Dynamo CLI...")
-
-    # Try to import and run dynamo CLI
-    try:
-        # Try different possible import paths for dynamo CLI
-        dynamo_main = None
-        import_paths = [
-            "dynamo.cli",
-            "ai_dynamo.cli",
-            "cli"
-        ]
-
-        for import_path in import_paths:
-            try:
-                module = importlib.import_module(import_path)
-                if hasattr(module, 'main'):
-                    dynamo_main = getattr(module, 'main')
-                    logger.info(f"Found dynamo main in {import_path}")
-                    break
-            except ImportError:
-                continue
-
-        if dynamo_main:
-            dynamo_main()
+            logger.info("✓ XConnector injected into worker (remote mode)")
         else:
-            logger.error("Could not find dynamo CLI main function")
-            sys.exit(1)
+            logger.warning("⚠ XConnector extension not available")
+
+# 测试连接
+def test_xconnector_connection():
+    """测试 XConnector 连接"""
+    try:
+        service_url = os.getenv("XCONNECTOR_SERVICE_URL", "http://xconnector-service:8081")
+        response = requests.get(f"{service_url}/status", timeout=10)
+
+        if response.status_code == 200:
+            status = response.json()
+            logger.info(f"✓ XConnector service status: {status}")
+            return True
+        else:
+            logger.error(f"✗ XConnector service error: {response.status_code}")
+            return False
 
     except Exception as e:
-        logger.error(f"Failed to start Dynamo: {e}")
-        sys.exit(1)
+        logger.error(f"✗ XConnector connection test failed: {e}")
+        return False
+
+if __name__ == "__main__":
+    logger.info("Testing XConnector connection...")
+    test_xconnector_connection()
+'''
+
+    # 写入扩展文件
+    extension_dir = Path("/workspace/xconnector-integration")
+    extension_dir.mkdir(exist_ok=True)
+
+    extension_file = extension_dir / "xconnector_extension.py"
+    with open(extension_file, 'w') as f:
+        f.write(extension_content)
+
+    # 创建 __init__.py
+    init_file = extension_dir / "__init__.py"
+    with open(init_file, 'w') as f:
+        f.write("# XConnector Integration Package\n")
+
+    logger.info(f"✓ Created XConnector extension at {extension_file}")
+
+
+def setup_environment():
+    """设置环境"""
+    # 添加集成包到 Python 路径
+    sys.path.insert(0, "/workspace/xconnector-integration")
+
+    # 设置环境变量
+    os.environ["PYTHONPATH"] = "/workspace:/workspace/xconnector-integration:" + os.environ.get("PYTHONPATH", "")
+
+    logger.info("✓ Environment setup completed")
+
+
+def main():
+    """主函数"""
+    logger.info("=== XConnector-Dynamo Integration Startup ===")
+
+    # 1. 设置环境
+    setup_environment()
+
+    # 2. 等待 XConnector 服务
+    if os.getenv("ENABLE_XCONNECTOR", "").lower() == "true":
+        wait_for_xconnector_service()
+
+    # 3. 创建集成扩展
+    create_xconnector_extension()
+
+    logger.info("✓ XConnector integration setup completed")
+    logger.info("Ready to start Dynamo with XConnector support")
+
+
+if __name__ == "__main__":
+    main()
