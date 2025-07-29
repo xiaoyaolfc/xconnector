@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  # XConnector 独立服务 - 使用你已有的镜像
+  # XConnector 服务 - 使用从本地上传的镜像
   xconnector-service:
-    image: xconnector-service:latest  # 使用你已有的镜像，不再构建
+    image: xconnector-service:latest
     container_name: xconnector-service
     environment:
       - ETCD_HOST=etcd
@@ -13,7 +13,7 @@ services:
       - LOG_LEVEL=INFO
       - PYTHONPATH=/app
     networks:
-      - dynamo-network
+      - xconnector-net
     ports:
       - "8081:8081"
     healthcheck:
@@ -22,23 +22,22 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    volumes:
+      - xconnector-logs:/app/logs
+      # 挂载 XConnector 配置文件
+      - ../../integrations/dynamo/configs/xconnector_config.yaml:/app/configs/xconnector_config.yaml:ro
+    restart: unless-stopped
     depends_on:
       etcd:
         condition: service_healthy
       nats:
         condition: service_started
-    volumes:
-      - xconnector-logs:/app/logs
-      # 如果需要自定义配置，取消下面的注释
-      # - ./configs/xconnector_config.yaml:/app/configs/xconnector_config.yaml:ro
-    restart: unless-stopped
 
-  # etcd - 使用你已有的 bitnami 镜像
+  # etcd - 使用离线服务器现有的镜像
   etcd:
-    image: bitnami/etcd:auth-online  # 使用你已有的镜像
+    image: bitnami/etcd:auth-online
     container_name: etcd
     environment:
-      # Bitnami etcd 的环境变量配置
       - ALLOW_NONE_AUTHENTICATION=yes
       - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
       - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
@@ -49,7 +48,7 @@ services:
       - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
       - ETCD_INITIAL_CLUSTER_STATE=new
     networks:
-      - dynamo-network
+      - xconnector-net
     ports:
       - "2379:2379"
       - "2380:2380"
@@ -63,16 +62,16 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # NATS - 使用你已有的 latest 镜像
+  # NATS - 使用离线服务器现有的镜像
   nats:
-    image: nats:latest  # 使用你已有的镜像
+    image: nats:latest
     container_name: nats
     networks:
-      - dynamo-network
+      - xconnector-net
     ports:
       - "4222:4222"
-      - "8222:8222"  # HTTP monitoring
-    command: ["-js", "-m", "8222"]  # Enable JetStream
+      - "8222:8222"
+    command: ["-js", "-m", "8222"]
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/"]
       interval: 30s
@@ -80,33 +79,52 @@ services:
       retries: 3
     restart: unless-stopped
 
-  # AI-Dynamo Worker
+  # Dynamo Worker - 使用离线服务器现有的镜像
   dynamo-worker:
-    image: dynamo:latest-vllm  # 使用你的 dynamo 镜像
+    image: dynamo-nvidia:v0.3.0-vllm0.8.4-lmcache0.2.1-inline
     container_name: dynamo-worker
     environment:
-      # XConnector 配置
+      # XConnector 集成配置
       - ENABLE_XCONNECTOR=true
       - XCONNECTOR_SERVICE_URL=http://xconnector-service:8081
-      # Dynamo 配置
+      - XCONNECTOR_FAIL_ON_ERROR=false
+
+      # Dynamo 基础配置
       - ETCD_HOST=etcd
       - ETCD_PORT=2379
       - NATS_URL=nats://nats:4222
+
       # Python 路径配置
-      - PYTHONPATH=/workspace:/xconnector-integration:$PYTHONPATH
-    volumes:
-      # 挂载配置文件到 Dynamo 工作目录
-      - ./configs/disagg_xconnector_remote.yaml:/workspace/configs/disagg.yaml:ro
-      # 挂载启动包装脚本（如果需要 XConnector 集成）
-      - ./dynamo-wrapper/startup-wrapper.py:/workspace/startup-wrapper.py:ro
-      # 挂载模型缓存目录
-      - model-cache:/workspace/models
-      # 挂载日志目录
-      - dynamo-logs:/workspace/logs
+      - PYTHONPATH=/workspace:/opt/dynamo/examples/llm:/workspace/xconnector-integration:$PYTHONPATH
+      - PATH=/opt/dynamo/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+
+      # 日志级别
+      - LOG_LEVEL=INFO
     networks:
-      - dynamo-network
-    # 使用包装脚本启动（如果需要 XConnector 集成）
-    command: ["python", "/workspace/startup-wrapper.py", "serve", "graphs.disagg:Frontend", "-f", "/workspace/configs/disagg.yaml"]
+      - xconnector-net
+    ports:
+      - "8000:8000"
+    volumes:
+      # 挂载 Dynamo 配置文件
+      - ../../integrations/dynamo/configs/disagg_with_xconnector.yaml:/workspace/configs/disagg.yaml:ro
+
+      # 挂载启动包装脚本
+      - ../../integrations/dynamo/startup-wrapper.py:/workspace/startup-wrapper.py:ro
+
+      # 挂载扩展加载器
+      - ../../integrations/dynamo/extension_loader.py:/workspace/xconnector-integration/extension_loader.py:ro
+
+      # 挂载注册表文件
+      - ../../integrations/dynamo/registry.py:/workspace/xconnector-integration/registry.py:ro
+
+      # 创建 __init__.py 让 Python 识别为包
+      - ../../integrations/dynamo/__init__.py:/workspace/xconnector-integration/__init__.py:ro
+
+      # 持久化存储
+      - dynamo-logs:/workspace/logs
+      - model-cache:/workspace/models
+
+    # GPU 支持
     deploy:
       resources:
         reservations:
@@ -114,6 +132,31 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health", "||", "exit", "1"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+
+    # 工作目录
+    working_dir: /opt/dynamo/examples/llm
+
+    # 启动命令 - 先运行集成脚本，再启动 Dynamo
+    command: [
+      "bash", "-c",
+      "echo 'Waiting for XConnector service...' && 
+       while ! curl -f http://xconnector-service:8081/health; do sleep 5; done && 
+       echo 'XConnector service is ready' && 
+       echo 'Setting up XConnector integration...' &&
+       python /workspace/startup-wrapper.py && 
+       echo 'Starting Dynamo with XConnector integration...' &&
+       /opt/dynamo/venv/bin/dynamo serve graphs.disagg:Frontend -f /workspace/configs/disagg.yaml"
+    ]
+
+    restart: unless-stopped
     depends_on:
       xconnector-service:
         condition: service_healthy
@@ -121,37 +164,20 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
-    restart: unless-stopped
-
-  # Frontend service
-  dynamo-frontend:
-    image: dynamo:latest-vllm  # 使用你的 dynamo 镜像
-    container_name: dynamo-frontend
-    environment:
-      - ETCD_HOST=etcd
-      - ETCD_PORT=2379
-      - PYTHONPATH=/workspace:$PYTHONPATH
-    volumes:
-      - ./configs/disagg_xconnector_remote.yaml:/workspace/configs/disagg.yaml:ro
-    networks:
-      - dynamo-network
-    ports:
-      - "8000:8000"
-    command: ["dynamo", "serve", "graphs.disagg:Frontend", "-f", "/workspace/configs/disagg.yaml"]
-    depends_on:
-      dynamo-worker:
-        condition: service_started
-    restart: unless-stopped
 
 networks:
-  dynamo-network:
+  xconnector-net:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.21.0.0/16
 
 volumes:
   etcd-data:
+    driver: local
   xconnector-logs:
+    driver: local
   dynamo-logs:
+    driver: local
   model-cache:
+    driver: local

@@ -1,6 +1,5 @@
 #!/bin/bash
-# 修复路径问题的 WSL 构建脚本
-# 文件名: build-wsl-fixed.sh
+# Docker 镜像离线打包脚本 (WSL Ubuntu 环境)
 
 set -e
 
@@ -12,31 +11,15 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # 配置变量
-XCONNECTOR_VERSION=${XCONNECTOR_VERSION:-"latest"}
-IMAGES_DIR="./docker-images"
+PACKAGE_NAME="xconnector-dynamo-$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="./docker-packages"
+COMPOSE_FILE="docker-compose-local.yml"
 
-echo -e "${GREEN}====================================${NC}"
-echo -e "${GREEN}XConnector WSL 构建工具 (修复版)${NC}"
-echo -e "${GREEN}====================================${NC}"
+echo -e "${GREEN}=== Docker 镜像离线打包工具 (WSL) ===${NC}"
 
-# 检查是否在 WSL 中
-check_wsl() {
-    if [[ ! -f /proc/version ]] || ! grep -q "microsoft\|WSL" /proc/version; then
-        echo -e "${YELLOW}警告: 未检测到 WSL 环境${NC}"
-        echo -e "${YELLOW}当前环境: $(uname -a)${NC}"
-        read -p "是否继续? (y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    else
-        echo -e "${GREEN}✓ WSL 环境检测成功${NC}"
-    fi
-}
-
-# 检查 Docker
+# 检查 Docker 环境
 check_docker() {
-    echo -e "${BLUE}检查 Docker 环境...${NC}"
+    echo -e "${YELLOW}检查 Docker 环境...${NC}"
 
     if ! command -v docker &> /dev/null; then
         echo -e "${RED}✗ Docker 未安装${NC}"
@@ -45,303 +28,395 @@ check_docker() {
 
     if ! docker info &> /dev/null; then
         echo -e "${RED}✗ Docker 服务未运行${NC}"
-        echo -e "${YELLOW}请启动 Docker Desktop 并确保 WSL 集成已启用${NC}"
+        echo -e "${YELLOW}请启动 Docker Desktop${NC}"
         exit 1
-    else
-        echo -e "${GREEN}✓ Docker 服务运行中${NC}"
     fi
 
-    echo -e "${GREEN}Docker 版本: $(docker --version)${NC}"
+    echo -e "${GREEN}✓ Docker 环境正常${NC}"
+    echo -e "${BLUE}Docker 版本: $(docker --version)${NC}"
 }
 
-# 智能定位项目根目录
-find_project_root() {
-    local current_dir="$(pwd)"
-    local script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+# 检查磁盘空间
+check_disk_space() {
+    echo -e "${YELLOW}检查磁盘空间...${NC}"
 
-    echo -e "${BLUE}脚本位置: $script_dir${NC}"
-    echo -e "${BLUE}当前目录: $current_dir${NC}"
+    available_space=$(df . | awk 'NR==2 {print $4}')
+    available_gb=$((available_space / 1024 / 1024))
 
-    # 方法1: 基于脚本位置推断（假设脚本在 deployments/ 目录下）
-    if [[ "$script_dir" == */deployments ]]; then
-        PROJECT_ROOT="$(dirname "$script_dir")"
-        echo -e "${BLUE}从脚本位置推断项目根目录: $PROJECT_ROOT${NC}"
-    # 方法2: 从当前目录向上查找
-    elif [[ -f "$current_dir/requirements.txt" && -d "$current_dir/xconnector" ]]; then
-        PROJECT_ROOT="$current_dir"
-        echo -e "${BLUE}当前目录就是项目根目录: $PROJECT_ROOT${NC}"
-    # 方法3: 向上查找包含标志文件的目录
-    else
-        local search_dir="$current_dir"
-        while [[ "$search_dir" != "/" ]]; do
-            if [[ -f "$search_dir/requirements.txt" && -d "$search_dir/xconnector" && -d "$search_dir/deployments" ]]; then
-                PROJECT_ROOT="$search_dir"
-                echo -e "${BLUE}找到项目根目录: $PROJECT_ROOT${NC}"
-                break
-            fi
-            search_dir="$(dirname "$search_dir")"
-        done
+    echo -e "${BLUE}可用空间: ${available_gb} GB${NC}"
 
-        if [[ -z "$PROJECT_ROOT" ]]; then
-            echo -e "${RED}✗ 无法找到项目根目录${NC}"
-            echo -e "${YELLOW}请确保在 xconnector 项目目录或其子目录中运行此脚本${NC}"
-            echo -e "${YELLOW}项目根目录应包含: requirements.txt, xconnector/, deployments/${NC}"
+    if [ $available_gb -lt 10 ]; then
+        echo -e "${YELLOW}⚠ 可用空间不足 10GB，可能导致打包失败${NC}"
+        read -p "是否继续? (y/n): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             exit 1
         fi
     fi
 }
 
-# 检查项目结构
-check_project_structure() {
-    echo -e "${BLUE}检查项目结构...${NC}"
+# 创建输出目录
+create_output_dir() {
+    echo -e "${YELLOW}创建输出目录...${NC}"
 
-    # 首先定位项目根目录
-    find_project_root
-
-    echo -e "${GREEN}项目根目录: $PROJECT_ROOT${NC}"
-
-    # 检查必要文件
-    local required_files=(
-        "xconnector"
-        "requirements.txt"
-        "deployments/docker/Dockerfile.xconnector-service"
-        "integrations/dynamo"
-    )
-
-    for file in "${required_files[@]}"; do
-        local full_path="$PROJECT_ROOT/$file"
-        if [[ ! -e "$full_path" ]]; then
-            echo -e "${RED}✗ 缺少必要文件/目录: $file${NC}"
-            echo -e "${RED}  完整路径: $full_path${NC}"
-            echo -e "${YELLOW}请检查项目结构是否完整${NC}"
-            exit 1
-        else
-            echo -e "${GREEN}✓ 找到: $file${NC}"
-        fi
-    done
-
-    echo -e "${GREEN}✓ 项目结构检查通过${NC}"
-
-    # 切换到项目根目录
-    cd "$PROJECT_ROOT"
-    echo -e "${BLUE}已切换到项目根目录: $(pwd)${NC}"
+    mkdir -p "$OUTPUT_DIR/$PACKAGE_NAME"
+    echo -e "${GREEN}✓ 输出目录: $OUTPUT_DIR/$PACKAGE_NAME${NC}"
 }
 
-# 构建镜像
-build_images() {
-    echo -e "${BLUE}开始构建 XConnector 服务镜像...${NC}"
-
-    # 显示构建上下文信息
-    echo -e "${BLUE}构建上下文: $(pwd)${NC}"
-    echo -e "${BLUE}Dockerfile: deployments/docker/Dockerfile.xconnector-service${NC}"
+# 重新构建 XConnector 镜像
+rebuild_xconnector() {
+    echo -e "${YELLOW}重新构建 XConnector 镜像...${NC}"
 
     # 检查 Dockerfile 是否存在
     if [[ ! -f "deployments/docker/Dockerfile.xconnector-service" ]]; then
-        echo -e "${RED}✗ Dockerfile 不存在: deployments/docker/Dockerfile.xconnector-service${NC}"
+        echo -e "${RED}✗ 未找到 Dockerfile: deployments/docker/Dockerfile.xconnector-service${NC}"
         exit 1
     fi
 
-    # 构建 XConnector 服务镜像
-    echo -e "${BLUE}执行构建命令...${NC}"
+    # 构建镜像
+    echo -e "${BLUE}构建 XConnector 服务镜像...${NC}"
     docker build \
         -f deployments/docker/Dockerfile.xconnector-service \
-        -t xconnector-service:${XCONNECTOR_VERSION} \
+        -t xconnector-service:latest \
         . \
-        --progress=plain
+        --no-cache
 
     if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}✓ XConnector 服务镜像构建成功${NC}"
+        echo -e "${GREEN}✓ XConnector 镜像构建成功${NC}"
     else
-        echo -e "${RED}✗ XConnector 服务镜像构建失败${NC}"
+        echo -e "${RED}✗ XConnector 镜像构建失败${NC}"
         exit 1
     fi
-
-    # 显示镜像信息
-    echo -e "${BLUE}构建的镜像:${NC}"
-    docker images | grep xconnector-service || echo "未找到 xconnector-service 镜像"
 }
 
-# 拉取依赖镜像
-pull_dependencies() {
-    echo -e "${BLUE}拉取依赖镜像...${NC}"
+# 列出所需镜像
+list_required_images() {
+    echo -e "${YELLOW}检查所需镜像...${NC}"
 
-    local deps=(
-        "quay.io/coreos/etcd:v3.5.9"
-        "nats:2.10-alpine"
-    )
+    # 从 docker-compose 文件提取镜像列表
+    if [[ -f "$COMPOSE_FILE" ]]; then
+        echo -e "${BLUE}从 $COMPOSE_FILE 提取镜像列表${NC}"
+        required_images=($(grep "image:" "$COMPOSE_FILE" | awk '{print $2}' | sort -u))
+    else
+        echo -e "${YELLOW}未找到 $COMPOSE_FILE，使用默认镜像列表${NC}"
+        required_images=(
+            "xconnector-service:latest"
+            "dynamo-nvidia:v0.3.0-vllm0.8.4-lmcache0.2.1-inline"
+            "bitnami/etcd:auth-online"
+            "nats:2.10-alpine"
+        )
+    fi
 
-    for dep in "${deps[@]}"; do
-        echo -e "${BLUE}拉取 $dep...${NC}"
-        docker pull "$dep"
-        if [[ $? -ne 0 ]]; then
-            echo -e "${YELLOW}警告: 拉取 $dep 失败，但继续执行${NC}"
+    echo -e "${BLUE}所需镜像列表:${NC}"
+    for image in "${required_images[@]}"; do
+        if docker image inspect "$image" &> /dev/null; then
+            size=$(docker image inspect "$image" --format='{{.Size}}' | awk '{print int($1/1024/1024/1024*100)/100}')
+            echo -e "${GREEN}✓ $image (${size}GB)${NC}"
+        else
+            echo -e "${RED}✗ $image (不存在)${NC}"
         fi
     done
 
-    echo -e "${GREEN}✓ 依赖镜像拉取完成${NC}"
+    echo "${required_images[@]}"
 }
 
-# 导出镜像
+# 导出 Docker 镜像
 export_images() {
-    echo -e "${BLUE}导出 Docker 镜像...${NC}"
+    echo -e "${YELLOW}导出 Docker 镜像...${NC}"
 
-    # 创建镜像目录
-    mkdir -p "$IMAGES_DIR"
+    # 获取镜像列表
+    images=($(list_required_images))
 
-    # 导出 XConnector 服务镜像
-    echo -e "${BLUE}导出 XConnector 服务镜像...${NC}"
-    docker save "xconnector-service:${XCONNECTOR_VERSION}" | gzip > "$IMAGES_DIR/xconnector-service_${XCONNECTOR_VERSION}.tar.gz"
+    # 导出每个镜像
+    for image in "${images[@]}"; do
+        if docker image inspect "$image" &> /dev/null; then
+            echo -e "${BLUE}导出镜像: $image${NC}"
 
-    # 导出依赖镜像
-    echo -e "${BLUE}导出依赖镜像...${NC}"
+            # 生成安全的文件名
+            safe_name=$(echo "$image" | sed 's/[\/:]/_/g')
+            output_file="$OUTPUT_DIR/$PACKAGE_NAME/${safe_name}.tar.gz"
 
-    # 检查镜像是否存在再导出
-    if docker images | grep -q "quay.io/coreos/etcd.*v3.5.9"; then
-        docker save "quay.io/coreos/etcd:v3.5.9" | gzip > "$IMAGES_DIR/etcd_v3.5.9.tar.gz"
-    else
-        echo -e "${YELLOW}警告: etcd 镜像不存在，跳过导出${NC}"
-    fi
+            # 导出并压缩
+            docker save "$image" | gzip > "$output_file"
 
-    if docker images | grep -q "nats.*2.10-alpine"; then
-        docker save "nats:2.10-alpine" | gzip > "$IMAGES_DIR/nats_2.10-alpine.tar.gz"
-    else
-        echo -e "${YELLOW}警告: nats 镜像不存在，跳过导出${NC}"
-    fi
-
-    echo -e "${GREEN}✓ 镜像导出完成${NC}"
-    echo -e "${BLUE}镜像文件位置: $IMAGES_DIR${NC}"
-    ls -lh "$IMAGES_DIR"/ || echo "镜像目录为空"
+            if [[ $? -eq 0 ]]; then
+                size=$(du -h "$output_file" | cut -f1)
+                echo -e "${GREEN}✓ 导出完成: $output_file (${size})${NC}"
+            else
+                echo -e "${RED}✗ 导出失败: $image${NC}"
+            fi
+        else
+            echo -e "${YELLOW}⚠ 跳过不存在的镜像: $image${NC}"
+        fi
+    done
 }
 
-# 创建部署包
-create_deployment_package() {
-    echo -e "${BLUE}创建部署包...${NC}"
+# 复制配置文件
+copy_configs() {
+    echo -e "${YELLOW}复制配置文件...${NC}"
 
-    local timestamp=$(date +"%Y%m%d_%H%M%S")
-    local package_name="xconnector-deployment-${timestamp}"
-
-    # 创建部署包目录
-    mkdir -p "$package_name"
-
-    # 复制文件
-    echo -e "${BLUE}复制部署文件...${NC}"
-
-    # 检查并复制 docker 配置
-    if [[ -d "deployments/docker" ]]; then
-        cp -r deployments/docker "$package_name/"
-        echo -e "${GREEN}✓ 复制 docker 配置${NC}"
-    else
-        echo -e "${RED}✗ deployments/docker 目录不存在${NC}"
-        exit 1
+    # 复制 Docker Compose 文件
+    if [[ -f "$COMPOSE_FILE" ]]; then
+        cp "$COMPOSE_FILE" "$OUTPUT_DIR/$PACKAGE_NAME/"
+        echo -e "${GREEN}✓ 复制: $COMPOSE_FILE${NC}"
     fi
 
-    # 检查并复制镜像
-    if [[ -d "$IMAGES_DIR" ]]; then
-        cp -r "$IMAGES_DIR" "$package_name/"
-        echo -e "${GREEN}✓ 复制镜像文件${NC}"
-    else
-        echo -e "${YELLOW}警告: 镜像目录不存在，创建空目录${NC}"
-        mkdir -p "$package_name/$IMAGES_DIR"
+    # 复制配置目录
+    if [[ -d "configs" ]]; then
+        cp -r configs "$OUTPUT_DIR/$PACKAGE_NAME/"
+        echo -e "${GREEN}✓ 复制: configs/目录${NC}"
     fi
 
-    # 创建部署脚本
-    cat > "$package_name/deploy-server.sh" << 'EOF'
+    # 复制集成脚本
+    if [[ -d "xconnector-integration" ]]; then
+        cp -r xconnector-integration "$OUTPUT_DIR/$PACKAGE_NAME/"
+        echo -e "${GREEN}✓ 复制: xconnector-integration/目录${NC}"
+    fi
+
+    # 复制启动脚本
+    if [[ -f "start_xconnector_dynamo.sh" ]]; then
+        cp start_xconnector_dynamo.sh "$OUTPUT_DIR/$PACKAGE_NAME/"
+        chmod +x "$OUTPUT_DIR/$PACKAGE_NAME/start_xconnector_dynamo.sh"
+        echo -e "${GREEN}✓ 复制: start_xconnector_dynamo.sh${NC}"
+    fi
+}
+
+# 创建加载脚本
+create_load_script() {
+    echo -e "${YELLOW}创建镜像加载脚本...${NC}"
+
+    cat > "$OUTPUT_DIR/$PACKAGE_NAME/load_images.sh" << 'EOF'
 #!/bin/bash
-# 服务器部署脚本
+# Docker 镜像加载脚本
 
 set -e
 
-echo "=== XConnector 服务器部署 ==="
+echo "=== Docker 镜像加载工具 ==="
 
-# 检查当前目录
-if [[ ! -d "docker-images" || ! -d "docker" ]]; then
-    echo "错误: 请在部署包目录中运行此脚本"
+# 检查 Docker
+if ! command -v docker &> /dev/null; then
+    echo "错误: Docker 未安装"
     exit 1
 fi
 
-# 加载镜像
-echo "加载 Docker 镜像..."
-cd docker-images
+if ! docker info &> /dev/null; then
+    echo "错误: Docker 服务未运行"
+    exit 1
+fi
 
-if [[ -n "$(ls -A . 2>/dev/null)" ]]; then
-    for f in *.tar.gz; do
-        if [[ -f "$f" ]]; then
-            echo "加载 $f"
-            gunzip -c "$f" | docker load
+# 加载所有镜像
+echo "开始加载 Docker 镜像..."
+
+for file in *.tar.gz; do
+    if [[ -f "$file" ]]; then
+        echo "加载镜像: $file"
+        gunzip -c "$file" | docker load
+
+        if [[ $? -eq 0 ]]; then
+            echo "✓ 加载成功: $file"
+        else
+            echo "✗ 加载失败: $file"
         fi
-    done
-else
-    echo "警告: 镜像目录为空"
-fi
-
-cd ../docker
-
-# 检查 AI-Dynamo 镜像
-if [[ -z "$DYNAMO_IMAGE" ]]; then
-    echo "警告: 未设置 DYNAMO_IMAGE 环境变量"
-    echo "请设置你的 AI-Dynamo 镜像名称:"
-    echo "export DYNAMO_IMAGE=your-dynamo-image:tag"
-    echo ""
-    echo "继续使用默认配置..."
-    export DYNAMO_IMAGE="ai-dynamo:latest"
-fi
-
-echo "使用 Dynamo 镜像: $DYNAMO_IMAGE"
-
-# 启动服务
-echo "启动服务..."
-docker-compose up -d
-
-echo "等待服务启动..."
-sleep 30
-
-# 健康检查
-echo "检查服务状态..."
-docker-compose ps
+    fi
+done
 
 echo ""
-echo "服务访问地址:"
-echo "  - XConnector API: http://localhost:8081"
-echo "  - 健康检查: curl http://localhost:8081/health"
+echo "镜像加载完成！"
+echo ""
+echo "查看已加载的镜像:"
+docker images | grep -E "(xconnector|dynamo|etcd|nats)"
 
 echo ""
-echo "部署完成!"
+echo "下一步："
+echo "1. 启动服务: ./start_xconnector_dynamo.sh start"
+echo "2. 查看状态: ./start_xconnector_dynamo.sh status"
 EOF
 
-    chmod +x "$package_name/deploy-server.sh"
+    chmod +x "$OUTPUT_DIR/$PACKAGE_NAME/load_images.sh"
+    echo -e "${GREEN}✓ 创建: load_images.sh${NC}"
+}
 
-    # 创建 README
-    cat > "$package_name/README.md" << EOF
-# XConnector 部署包
+# 创建部署说明
+create_readme() {
+    echo -e "${YELLOW}创建部署说明...${NC}"
 
-构建时间: $(date)
-构建环境: WSL
+    cat > "$OUTPUT_DIR/$PACKAGE_NAME/README.md" << EOF
+# XConnector + Dynamo 离线部署包
+
+**打包时间**: $(date)
+**打包环境**: WSL Ubuntu
+**包名称**: $PACKAGE_NAME
 
 ## 部署步骤
 
-1. 设置 AI-Dynamo 镜像名称：
+### 1. 传输到服务器
 \`\`\`bash
-export DYNAMO_IMAGE=your-ai-dynamo-image:tag
+# 方式1: 使用 scp
+scp -r $PACKAGE_NAME user@server:/path/to/deploy/
+
+# 方式2: 先压缩再传输
+tar -czf $PACKAGE_NAME.tar.gz $PACKAGE_NAME/
+scp $PACKAGE_NAME.tar.gz user@server:/path/to/deploy/
+
+# 在服务器上解压
+tar -xzf $PACKAGE_NAME.tar.gz
+cd $PACKAGE_NAME/
 \`\`\`
 
-2. 运行部署脚本：
+### 2. 加载 Docker 镜像
 \`\`\`bash
-./deploy-server.sh
+# 执行镜像加载脚本
+./load_images.sh
+\`\`\`
+
+### 3. 启动服务
+\`\`\`bash
+# 启动所有服务
+./start_xconnector_dynamo.sh start
+
+# 查看服务状态
+./start_xconnector_dynamo.sh status
+
+# 查看日志
+./start_xconnector_dynamo.sh logs
 \`\`\`
 
 ## 服务访问
-- XConnector API: http://localhost:8081
-- 健康检查: \`curl http://localhost:8081/health\`
+
+- **XConnector API**: http://localhost:8081
+- **Dynamo Frontend**: http://localhost:8000
+- **etcd**: http://localhost:2379
+- **NATS 监控**: http://localhost:8222
+
+## 测试命令
+
+\`\`\`bash
+# 测试 XConnector
+curl http://localhost:8081/health
+
+# 测试 Dynamo
+curl http://localhost:8000/health
+
+# 运行联调测试
+./start_xconnector_dynamo.sh test
+\`\`\`
+
+## 故障排除
+
+\`\`\`bash
+# 查看特定服务日志
+docker-compose -f docker-compose-local.yml logs xconnector-service
+docker-compose -f docker-compose-local.yml logs dynamo-worker
+
+# 重启服务
+./start_xconnector_dynamo.sh restart
+
+# 停止服务
+./start_xconnector_dynamo.sh stop
+\`\`\`
 
 ## 文件说明
-- docker/: Docker Compose 配置
-- docker-images/: Docker 镜像文件
-- deploy-server.sh: 部署脚本
+
+- \`*.tar.gz\`: Docker 镜像文件
+- \`docker-compose-local.yml\`: 服务编排配置
+- \`configs/\`: 配置文件目录
+- \`xconnector-integration/\`: 集成脚本
+- \`load_images.sh\`: 镜像加载脚本
+- \`start_xconnector_dynamo.sh\`: 服务管理脚本
 EOF
 
-    echo -e "${GREEN}✓ 部署包创建完成: $package_name${NC}"
-    echo -e "${BLUE}包含文件:${NC}"
-    ls -la "$package_name"/ || echo "无法列出部署包内容"
+    echo -e "${GREEN}✓ 创建: README.md${NC}"
+}
+
+# 创建传输脚本
+create_transfer_script() {
+    echo -e "${YELLOW}创建传输脚本...${NC}"
+
+    cat > "$OUTPUT_DIR/transfer_to_server.sh" << 'EOF'
+#!/bin/bash
+# 传输部署包到服务器脚本
+
+if [[ $# -ne 2 ]]; then
+    echo "用法: $0 <部署包目录> <服务器地址:路径>"
+    echo "示例: $0 xconnector-dynamo-20241223_143022 user@192.168.1.100:/home/user/deploy/"
+    exit 1
+fi
+
+PACKAGE_DIR="$1"
+SERVER_TARGET="$2"
+
+if [[ ! -d "$PACKAGE_DIR" ]]; then
+    echo "错误: 部署包目录不存在: $PACKAGE_DIR"
+    exit 1
+fi
+
+echo "=== 传输部署包到服务器 ==="
+echo "部署包: $PACKAGE_DIR"
+echo "目标: $SERVER_TARGET"
+echo ""
+
+# 压缩部署包
+echo "压缩部署包..."
+tar -czf "${PACKAGE_DIR}.tar.gz" "$PACKAGE_DIR"
+
+if [[ $? -eq 0 ]]; then
+    echo "✓ 压缩完成: ${PACKAGE_DIR}.tar.gz"
+    echo "压缩包大小: $(du -h ${PACKAGE_DIR}.tar.gz | cut -f1)"
+else
+    echo "✗ 压缩失败"
+    exit 1
+fi
+
+# 传输到服务器
+echo ""
+echo "传输到服务器..."
+scp "${PACKAGE_DIR}.tar.gz" "$SERVER_TARGET"
+
+if [[ $? -eq 0 ]]; then
+    echo "✓ 传输完成"
+    echo ""
+    echo "在服务器上执行以下命令:"
+    echo "  tar -xzf ${PACKAGE_DIR}.tar.gz"
+    echo "  cd ${PACKAGE_DIR}/"
+    echo "  ./load_images.sh"
+    echo "  ./start_xconnector_dynamo.sh start"
+else
+    echo "✗ 传输失败"
+    exit 1
+fi
+EOF
+
+    chmod +x "$OUTPUT_DIR/transfer_to_server.sh"
+    echo -e "${GREEN}✓ 创建: transfer_to_server.sh${NC}"
+}
+
+# 显示包信息
+show_package_info() {
+    echo -e "\n${GREEN}=== 打包完成 ===${NC}"
+
+    # 计算包大小
+    package_size=$(du -sh "$OUTPUT_DIR/$PACKAGE_NAME" | cut -f1)
+
+    echo -e "${BLUE}部署包信息:${NC}"
+    echo -e "  路径: $OUTPUT_DIR/$PACKAGE_NAME"
+    echo -e "  大小: $package_size"
+
+    echo -e "\n${BLUE}包含文件:${NC}"
+    ls -la "$OUTPUT_DIR/$PACKAGE_NAME/" | head -20
+
+    if [[ $(ls "$OUTPUT_DIR/$PACKAGE_NAME/" | wc -l) -gt 18 ]]; then
+        echo -e "  ... (更多文件)"
+    fi
+
+    echo -e "\n${GREEN}=== 后续步骤 ===${NC}"
+    echo -e "1. 传输到服务器:"
+    echo -e "   ${BLUE}$OUTPUT_DIR/transfer_to_server.sh $PACKAGE_NAME user@server:/path/${NC}"
+    echo -e ""
+    echo -e "2. 在服务器上部署:"
+    echo -e "   ${BLUE}tar -xzf $PACKAGE_NAME.tar.gz${NC}"
+    echo -e "   ${BLUE}cd $PACKAGE_NAME/${NC}"
+    echo -e "   ${BLUE}./load_images.sh${NC}"
+    echo -e "   ${BLUE}./start_xconnector_dynamo.sh start${NC}"
 }
 
 # 主函数
@@ -349,48 +424,50 @@ main() {
     local action=${1:-"all"}
 
     case $action in
-        "check")
-            check_wsl
-            check_docker
-            check_project_structure
-            ;;
         "build")
-            check_wsl
             check_docker
-            check_project_structure
-            build_images
+            rebuild_xconnector
             ;;
         "export")
-            pull_dependencies
+            check_docker
+            check_disk_space
+            create_output_dir
             export_images
             ;;
         "package")
-            check_wsl
             check_docker
-            check_project_structure
-            build_images
-            pull_dependencies
-            export_images
-            create_deployment_package
+            check_disk_space
+            create_output_dir
+            copy_configs
+            create_load_script
+            create_readme
+            create_transfer_script
             ;;
         "all")
-            check_wsl
             check_docker
-            check_project_structure
-            build_images
-            pull_dependencies
+            check_disk_space
+            create_output_dir
+            rebuild_xconnector
             export_images
-            create_deployment_package
+            copy_configs
+            create_load_script
+            create_readme
+            create_transfer_script
+            show_package_info
             ;;
         "help"|*)
-            echo "用法: $0 {check|build|export|package|all}"
+            echo "用法: $0 {build|export|package|all}"
             echo ""
             echo "命令说明:"
-            echo "  check   - 检查环境和项目结构"
-            echo "  build   - 仅构建镜像"
+            echo "  build   - 重新构建 XConnector 镜像"
             echo "  export  - 仅导出镜像"
-            echo "  package - 创建完整部署包"
-            echo "  all     - 执行完整流程（默认）"
+            echo "  package - 仅打包配置文件和脚本"
+            echo "  all     - 执行完整打包流程（默认）"
+            echo ""
+            echo "示例:"
+            echo "  $0 all                    # 完整打包"
+            echo "  $0 build                  # 仅重新构建镜像"
+            echo "  $0 export                 # 仅导出镜像"
             ;;
     esac
 }

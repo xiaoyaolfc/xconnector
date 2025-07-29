@@ -47,16 +47,14 @@ ls -la deployments/docker/
 ### 4. 执行构建
 
 ```bash
-# 进入部署目录
-cd deployments
+# 在项目根目录执行
+# 1. 构建 XConnector 镜像
+docker build -f deployments/docker/Dockerfile.xconnector-service -t xconnector-service:latest .
 
-# 执行完整构建流程
-./build-wsl.sh all
+# 2. 导出镜像
+docker save xconnector-service:latest | gzip > xconnector-service_latest.tar.gz
 
-# 或者分步执行：
-# ./build-wsl.sh check     # 先检查环境
-# ./build-wsl.sh build     # 构建镜像
-# ./build-wsl.sh package   # 创建部署包
+# 3. 手动上传镜像
 ```
 
 ### 5. 构建过程中你会看到：
@@ -114,45 +112,21 @@ ls -la xconnector-deployment-*/
 # README.md           ← 说明文档
 ```
 
-### 7. 传输到服务器
+### . 在服务器上部署
 
-现在你有两种方式传输到服务器：
-
-#### 方式A：使用提供的传输脚本
-```bash
-# 进入部署包目录
-cd xconnector-deployment-*/
-
-# 传输到服务器
-./transfer-to-server.sh user@your-server:/path/to/deploy/
-
-# 例如：
-./transfer-to-server.sh ubuntu@192.168.1.100:/home/ubuntu/xconnector/
-```
-
-#### 方式B：手动传输
-```bash
-# 使用 scp 传输整个部署包
-scp -r xconnector-deployment-* user@your-server:/path/to/deploy/
-
-# 或者先压缩再传输
-tar -czf xconnector-deployment.tar.gz xconnector-deployment-*/
-scp xconnector-deployment.tar.gz user@your-server:/path/to/deploy/
-```
-
-### 8. 在服务器上部署
-
-SSH 到你的服务器：
+在堡垒机上
 
 ```bash
-ssh user@your-server
-cd /path/to/deploy/xconnector-deployment-*/
+# 1. 加载 XConnector 镜像
+gunzip -c xconnector-service_latest.tar.gz | docker load
 
-# 设置你的 AI-Dynamo 镜像名称
-export DYNAMO_IMAGE=your-ai-dynamo-image:tag
+# 2. 部署
+cd /path/to/xconnector
+chmod +x deployments/deploy-offline.sh
+./deployments/deploy-offline.sh deploy
 
-# 执行部署
-./deploy-server.sh
+# 3. 检查状态
+./deployments/deploy-offline.sh status
 ```
 
 ### 9. 验证部署
@@ -167,15 +141,3 @@ curl http://localhost:8081/health
 # 查看日志
 docker-compose logs -f xconnector-service
 ```
-
-## 🎯 **现在就可以开始了！**
-
-你只需要：
-
-1. 在 WSL 中进入你的 xconnector 项目目录
-2. 创建并运行 `deployments/build-wsl.sh` 脚本
-3. 等待构建完成
-4. 传输部署包到服务器
-5. 在服务器上运行部署脚本
-
-如果过程中遇到任何问题，告诉我具体的错误信息，我会帮你解决！
