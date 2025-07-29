@@ -1,13 +1,22 @@
-# XConnector configuration for AI-Dynamo integration
-# 该代码配置于ai-dynamo/examples/vllm_v0/configs中
+# XConnector 服务配置
+# 用于与 Dynamo 集成的独立服务
+
 XConnectorService:
-  # Basic service configuration
+  # 基础服务配置
   namespace: xconnector
   component_name: xconnector-service
+  service_id: xconnector-dynamo-integration
 
-  # Adapter configurations
+  # 服务器配置
+  server:
+    host: "0.0.0.0"
+    port: 8081
+    workers: 1
+    log_level: INFO
+
+  # 适配器配置
   adapters:
-    # VLLM Adapter
+    # vLLM 推理适配器
     vllm:
       enabled: true
       class_path: "xconnector.adapters.inference.vllm_adapter.VLLMAdapter"
@@ -19,38 +28,56 @@ XConnectorService:
         kv_cache_dtype: "auto"
         enable_prefix_caching: true
         enable_chunked_prefill: false
+        # 推理引擎配置
+        engine_args:
+          model: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+          tensor_parallel_size: 1
+          max_model_len: 16384
+          block_size: 64
 
-    # LMCache Adapter
+    # LMCache 缓存适配器
     lmcache:
       enabled: true
       class_path: "xconnector.adapters.cache.lmcache_adapter.LMCacheAdapter"
       config:
-        storage_backend: "local"
+        storage_backend: "memory"  # memory, redis, distributed
         max_cache_size: 2048  # MB
         enable_compression: true
         cache_config:
           block_size: 16
           num_gpu_blocks: 1000
           num_cpu_blocks: 1000
+          cache_dtype: "auto"
+        # LMCache 引擎配置
+        engine_config:
+          chunked_prefill_enabled: false
+          chunk_size: 512
 
-    # Dynamo Adapter
+    # Dynamo 分布式适配器
     dynamo:
       enabled: true
       class_path: "xconnector.adapters.distributed.dynamo_adapter.DynamoAdapter"
       config:
         namespace: "dynamo"
         component_name: "xconnector"
+        # 路由策略配置
         routing_policy:
-          strategy: "least_loaded"  # Options: least_loaded, round_robin, affinity
+          strategy: "least_loaded"  # least_loaded, round_robin, affinity
           affinity_key: "session_id"
           max_requests_per_worker: 100
           health_check_interval: 30
           unhealthy_threshold: 3
+        # etcd 配置
+        etcd_config:
+          host: "etcd"
+          port: 2379
+          prefix: "/dynamo/xconnector"
 
-  # Routing configuration
+  # 路由配置
   routing:
-    # Default routing rules
+    # 默认路由规则
     rules:
+      # 推理 -> 缓存
       - source_type: "inference"
         target_type: "cache"
         enabled: true
@@ -59,34 +86,64 @@ XConnectorService:
         retry_count: 2
         circuit_breaker_enabled: true
 
+      # 缓存 -> 推理
       - source_type: "cache"
         target_type: "inference"
         enabled: true
         priority: 1
         timeout: 30.0
+        retry_count: 1
 
+      # 分布式 -> 推理
       - source_type: "distributed"
         target_type: "inference"
         enabled: true
         priority: 0
+        timeout: 60.0
 
-    # Load balancing
+      # 分布式 -> 缓存
+      - source_type: "distributed"
+        target_type: "cache"
+        enabled: true
+        priority: 0
+        timeout: 30.0
+
+    # 负载均衡配置
     load_balancing:
       default_strategy: "round_robin"
       health_based_routing: true
       circuit_breaker:
         failure_threshold: 5
         timeout: 60.0
+        half_open_max_calls: 3
 
-  # Monitoring configuration
+  # 监控配置
   monitoring:
     metrics_enabled: true
     metrics_port: 9090
     health_check_interval: 30
     log_level: "INFO"
 
-  # Performance tuning
+    # Prometheus 配置
+    prometheus:
+      enabled: false
+      endpoint: "/metrics"
+
+    # 健康检查配置
+    health_check:
+      enabled: true
+      endpoint: "/health"
+      detailed_endpoint: "/status"
+
+  # 性能配置
   performance:
     connection_pool_size: 100
     request_timeout: 60.0
     max_concurrent_requests: 1000
+    keep_alive_timeout: 30
+
+    # 缓存配置
+    result_cache:
+      enabled: true
+      max_size: 1000
+      ttl: 300  # 5 minutes
