@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # XConnector 服务 - 使用从本地上传的镜像
   xconnector-service:
     image: xconnector-service:latest
     container_name: xconnector-service
@@ -24,16 +23,12 @@ services:
       start_period: 40s
     volumes:
       - xconnector-logs:/app/logs
-      # 挂载 XConnector 配置文件
       - ../../integrations/dynamo/configs/xconnector_config.yaml:/app/configs/xconnector_config.yaml:ro
     restart: unless-stopped
     depends_on:
-      etcd:
-        condition: service_healthy
-      nats:
-        condition: service_started
+      - etcd
+      - nats
 
-  # etcd - 使用离线服务器现有的镜像
   etcd:
     image: bitnami/etcd:auth-online
     container_name: etcd
@@ -54,15 +49,8 @@ services:
       - "2380:2380"
     volumes:
       - etcd-data:/bitnami/etcd/data
-    healthcheck:
-      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
     restart: unless-stopped
 
-  # NATS - 使用离线服务器现有的镜像
   nats:
     image: nats:latest
     container_name: nats
@@ -72,105 +60,128 @@ services:
       - "4222:4222"
       - "8222:8222"
     command: ["-js", "-m", "8222"]
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
     restart: unless-stopped
 
-  # Dynamo Worker - 使用离线服务器现有的镜像
   dynamo-worker:
     image: dynamo-nvidia:v0.3.0-vllm0.8.4-lmcache0.2.1-inline
     container_name: dynamo-worker
+    runtime: nvidia
     environment:
-      # XConnector 集成配置
+      - NVIDIA_VISIBLE_DEVICES=all
       - ENABLE_XCONNECTOR=true
       - XCONNECTOR_SERVICE_URL=http://xconnector-service:8081
       - XCONNECTOR_FAIL_ON_ERROR=false
-
-      # Dynamo 基础配置
-      - ETCD_HOST=etcd
-      - ETCD_PORT=2379
-      - NATS_URL=nats://nats:4222
-
-      # Python 路径配置
-      - PYTHONPATH=/workspace:/opt/dynamo/examples/llm:/workspace/xconnector-integration:$PYTHONPATH
+      - ETCD_USERNAME=
+      - ETCD_PASSWORD=
+      - ETCD_USER=
+      - ETCD_AUTH_TOKEN=
+      - PYTHONPATH=/workspace:/opt/dynamo/examples/llm:/workspace/xconnector-integration
       - PATH=/opt/dynamo/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
-
-      # 日志级别
       - LOG_LEVEL=INFO
     networks:
       - xconnector-net
     ports:
       - "8000:8000"
     volumes:
-      # 挂载 Dynamo 配置文件
       - ../../integrations/dynamo/configs/disagg_with_xconnector.yaml:/workspace/configs/disagg.yaml:ro
-
-      # 挂载启动包装脚本
       - ../../integrations/dynamo/startup-wrapper.py:/workspace/startup-wrapper.py:ro
-
-      # 挂载扩展加载器
-      - ../../integrations/dynamo/extension_loader.py:/workspace/xconnector-integration/extension_loader.py:ro
-
-      # 挂载注册表文件
-      - ../../integrations/dynamo/registry.py:/workspace/xconnector-integration/registry.py:ro
-
-      # 创建 __init__.py 让 Python 识别为包
-      - ../../integrations/dynamo/__init__.py:/workspace/xconnector-integration/__init__.py:ro
-
-      # 持久化存储
+      - xconnector-integration:/workspace/xconnector-integration
+      - ../../integrations/dynamo/extension_loader.py:/tmp/extension_loader.py:ro
+      - ../../integrations/dynamo/registry.py:/tmp/registry.py:ro
+      - ../../integrations/dynamo/__init__.py:/tmp/__init__.py:ro
       - dynamo-logs:/workspace/logs
       - model-cache:/workspace/models
-
-    # GPU 支持
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-    # 健康检查
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health", "||", "exit", "1"]
-      interval: 60s
-      timeout: 30s
-      retries: 3
-      start_period: 120s
-
-    # 工作目录
-    working_dir: /opt/dynamo/examples/llm
-
-    # 启动命令 - 先运行集成脚本，再启动 Dynamo
+    working_dir: /workspace/examples/llm
     command: [
       "bash", "-c",
-      "echo 'Waiting for XConnector service...' && 
-       while ! curl -f http://xconnector-service:8081/health; do sleep 5; done && 
-       echo 'XConnector service is ready' && 
-       echo 'Setting up XConnector integration...' &&
-       python /workspace/startup-wrapper.py && 
-       echo 'Starting Dynamo with XConnector integration...' &&
+      "echo 'Creating simple proxy...' &&
+       python3 -c \"
+import socket, threading, sys
+
+def proxy(local_port, target_host, target_port):
+    def handle_client(client_socket):
+        try:
+            server_socket = socket.socket()
+            server_socket.connect((target_host, target_port))
+            def forward(src, dst):
+                while True:
+                    try:
+                        data = src.recv(4096)
+                        if not data: break
+                        dst.send(data)
+                    except: break
+            threading.Thread(target=forward, args=(client_socket, server_socket), daemon=True).start()
+            threading.Thread(target=forward, args=(server_socket, client_socket), daemon=True).start()
+        except Exception as e:
+            print(f'Proxy error: {e}')
+            client_socket.close()
+    
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('127.0.0.1', local_port))
+    server.listen(5)
+    print(f'Proxy {local_port} -> {target_host}:{target_port}')
+    while True:
+        client, addr = server.accept()
+        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
+
+if __name__ == '__main__':
+    proxy(int(sys.argv[1]), sys.argv[2], int(sys.argv[3]))
+\" 2379 etcd 2379 &
+       python3 -c \"
+import socket, threading, sys
+
+def proxy(local_port, target_host, target_port):
+    def handle_client(client_socket):
+        try:
+            server_socket = socket.socket()
+            server_socket.connect((target_host, target_port))
+            def forward(src, dst):
+                while True:
+                    try:
+                        data = src.recv(4096)
+                        if not data: break
+                        dst.send(data)
+                    except: break
+            threading.Thread(target=forward, args=(client_socket, server_socket), daemon=True).start()
+            threading.Thread(target=forward, args=(server_socket, client_socket), daemon=True).start()
+        except Exception as e:
+            print(f'Proxy error: {e}')
+            client_socket.close()
+    
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('127.0.0.1', local_port))
+    server.listen(5)
+    print(f'Proxy {local_port} -> {target_host}:{target_port}')
+    while True:
+        client, addr = server.accept()
+        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
+
+if __name__ == '__main__':
+    proxy(int(sys.argv[1]), sys.argv[2], int(sys.argv[3]))
+\" 4222 nats 4222 &
+       sleep 3 &&
+       echo 'Waiting for XConnector...' &&
+       while ! curl -f http://xconnector-service:8081/health; do sleep 5; done &&
+       echo 'Setting up integration...' &&
+       mkdir -p /workspace/xconnector-integration &&
+       cp /tmp/extension_loader.py /workspace/xconnector-integration/ &&
+       cp /tmp/registry.py /workspace/xconnector-integration/ &&
+       cp /tmp/__init__.py /workspace/xconnector-integration/ &&
+       python /workspace/startup-wrapper.py &&
+       echo 'Starting Dynamo...' &&
        /opt/dynamo/venv/bin/dynamo serve graphs.disagg:Frontend -f /workspace/configs/disagg.yaml"
     ]
-
     restart: unless-stopped
     depends_on:
-      xconnector-service:
-        condition: service_healthy
-      etcd:
-        condition: service_healthy
-      nats:
-        condition: service_started
+      - xconnector-service
+      - etcd
+      - nats
 
 networks:
   xconnector-net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.21.0.0/16
 
 volumes:
   etcd-data:
@@ -180,4 +191,6 @@ volumes:
   dynamo-logs:
     driver: local
   model-cache:
+    driver: local
+  xconnector-integration:
     driver: local

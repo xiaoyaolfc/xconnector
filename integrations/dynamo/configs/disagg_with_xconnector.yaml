@@ -8,7 +8,7 @@ Common:
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
+  served_model_name: DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
   endpoint: dynamo.VllmWorker.generate
   port: 8000
   router: round-robin
@@ -24,45 +24,14 @@ VllmWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: 8
   
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
-  
-  # XConnector 扩展配置
-  extensions:
-    xconnector:
-      enabled: true
-      service_mode: remote
-      service_url: http://xconnector-service:8081
-      fail_on_error: false
-      
-      # 远程模式配置
-      remote_config:
-        timeout: 30
-        retry_count: 3
-        health_check_interval: 60
-      
-      # 适配器配置（由 XConnector 服务管理）
-      adapters:
-        vllm:
-          enabled: true
-          type: inference
-          priority: 1
-        
-        lmcache:
-          enabled: true
-          type: cache
-          priority: 2
-        
-        dynamo:
-          enabled: true
-          type: distributed
-          priority: 0
 
 PrefillWorker:
   max-num-batched-tokens: 16384
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: 8
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
