@@ -1,13 +1,14 @@
-# Dynamo 配置文件 - 完整的服务地址配置（修正版）
-# 适用于分布式推理场景
+# Dynamo 配置文件 - 分离路由模式集成 XConnector
+# 适用于带路由的分布式推理场景
 
 Common:
   model: /data/model/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
   block-size: 64
   max-model-len: 16384
+  router: kv
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
-  # 关键修复：明确的服务地址配置
+  # XConnector 服务地址配置
   etcd-endpoints: ['http://etcd:2379']
   etcd-url: "http://etcd:2379"
   nats-url: "nats://nats:4222"
@@ -20,27 +21,32 @@ Frontend:
   common-configs: [etcd-endpoints, etcd-url, nats-url, nats-server]
 
 Processor:
-  router: round-robin
-  common-configs: [model, block-size, etcd-endpoints, etcd-url, nats-url, nats-server]
+  common-configs: [model, block-size, max-model-len, router, etcd-endpoints, etcd-url, nats-url, nats-server]
+
+Router:
+  min-workers: 1
+  common-configs: [model, block-size, router, etcd-endpoints, etcd-url, nats-url, nats-server]
 
 VllmWorker:
+  max-num-batched-tokens: 16384
   remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
+  tensor-parallel-size: 8
   enable-prefix-caching: true
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 8
-  common-configs: [model, block-size, max-model-len, kv-transfer-config, etcd-endpoints, etcd-url, nats-url, nats-server]
+      gpu: '8'
+  common-configs: [model, block-size, max-model-len, router, kv-transfer-config, etcd-endpoints, etcd-url, nats-url, nats-server]
 
 PrefillWorker:
   max-num-batched-tokens: 16384
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 8
+      gpu: '8'
   common-configs: [model, block-size, max-model-len, kv-transfer-config, etcd-endpoints, etcd-url, nats-url, nats-server]
 
 Planner:
