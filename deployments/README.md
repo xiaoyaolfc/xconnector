@@ -14,28 +14,26 @@ python deployments/scripts/deploy_xconnector.py --install
 ```
 ## 部署步骤
 
-1. 设置权限
-```bash
-chmod +x deployments/docker/start-xconnector.sh
-```
-2. 设置 Dynamo 镜像（如果使用私有镜像）
-```bash
-export DYNAMO_IMAGE="your-registry/ai-dynamo:latest"
-```
-3. 启动所有服务
-```bash
-./deployments/docker/start-xconnector.sh
-```
-4. 查看日志
-```bash
-docker-compose -f deployments/docker/docker-compose.yml logs -f
-```
-5. curl测试
-```base
-curl http://localhost:8081/health
-curl http://localhost:8000/v1/models
+# 1. 确保有相同的文件
+```shell
+deployments/docker/docker-compose.yml
+integrations/dynamo/configs/disagg_with_xconnector.yaml
+
 ```
 
+# 2. 部署命令
+```shell
+./deployments/pre-deployment-check.sh
+docker-compose -f deployments/docker/docker-compose.yml down
+docker-compose -f deployments/docker/docker-compose.yml up -d
+./deployments/final-fix-verification.sh verify
+```
+
+# 3. 等待并检查
+```shell
+sleep 90
+curl http://localhost:8000/health
+```
 
 
 

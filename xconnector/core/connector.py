@@ -5,6 +5,9 @@ from typing import Any, Dict, List, Optional, Type, Union, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import torch
+import threading
+import importlib
+import inspect
 
 from xconnector.core.plugin_manager import PluginManager
 from xconnector.core.router import Router
@@ -43,21 +46,26 @@ class XConnector:
     3. 动态适配器加载
     4. 健康检查和监控
     5. 分布式协调
+    6. SDK嵌入模式支持
     """
 
     _instance = None
     _initialized = False
 
-    def __new__(cls, config: Optional[ConnectorConfig] = None):
-        if not cls._instance:
+    def __new__(cls, config: Optional[ConnectorConfig] = None, force_new: bool = False):
+        # SDK模式下支持创建新实例
+        if force_new or not cls._instance:
             cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, config: Optional[ConnectorConfig] = None):
-        if self._initialized:
+    def __init__(self, config: Optional[ConnectorConfig] = None, sdk_mode: bool = False):
+        # SDK模式下允许重新初始化
+        if self._initialized and not sdk_mode:
             return
 
         self.config = config or ConnectorConfig()
+        self.sdk_mode = sdk_mode
 
         # 原 XConnectorCore 的功能整合到这里
         self.plugin_manager = PluginManager()
@@ -68,20 +76,35 @@ class XConnector:
         self.cache_adapters: Dict[str, BaseInterface] = {}
         self.distributed_adapters: Dict[str, BaseInterface] = {}
 
-        # 原 core 的消息队列和任务管理功能
-        self.connection_table: Dict[str, asyncio.Queue] = {}
-        self.task_table: Dict[str, asyncio.Task] = {}
+        # 原 core 的消息队列和任务管理功能（SDK模式下简化）
+        if not sdk_mode:
+            self.connection_table: Dict[str, asyncio.Queue] = {}
+            self.task_table: Dict[str, asyncio.Task] = {}
+        else:
+            # SDK模式下不需要这些功能
+            self.connection_table = {}
+            self.task_table = {}
 
         # 运行时状态
         self.is_running = False
         self.health_check_task: Optional[asyncio.Task] = None
 
+        # 线程锁（用于适配器管理）
+        self._lock = threading.RLock()
+
+        # 已加载模块缓存（从PluginManager移过来）
+        self._loaded_modules: Dict[str, Any] = {}
+
         # 初始化核心组件
         self._initialize_components()
-        self._load_configured_adapters()
+
+        # 只在非SDK模式下自动加载适配器
+        if not sdk_mode:
+            self._load_configured_adapters()
 
         self._initialized = True
-        logger.info("XConnector initialized successfully")
+        mode_info = "SDK mode" if sdk_mode else "standalone mode"
+        logger.info(f"XConnector initialized successfully in {mode_info}")
 
     # 原core方法，保持兼容性
     def register_vllm(self, adapter: BaseInterface):
@@ -138,25 +161,37 @@ class XConnector:
             raise
 
     def create_endpoint(self, endpoint: str, queue_size: int = 100):
-        """创建端点的消息队列"""
+        """创建端点的消息队列（仅非SDK模式）"""
+        if self.sdk_mode:
+            return  # SDK模式下不需要队列
+
         if endpoint not in self.connection_table:
             self.connection_table[endpoint] = asyncio.Queue(queue_size)
             logger.debug(f"Created endpoint queue: {endpoint}")
 
     async def send(self, endpoint: str, *args, **kwargs):
-        """发送消息到指定端点"""
+        """发送消息到指定端点（仅非SDK模式）"""
+        if self.sdk_mode:
+            return  # SDK模式下不需要队列
+
         if endpoint not in self.connection_table:
             self.create_endpoint(endpoint)
         await self.connection_table[endpoint].put((args, kwargs))
 
     async def receive(self, endpoint: str) -> Tuple[Tuple, Dict]:
-        """从端点接收消息"""
+        """从端点接收消息（仅非SDK模式）"""
+        if self.sdk_mode:
+            return ((), {})  # SDK模式下返回空
+
         if endpoint not in self.connection_table:
             self.create_endpoint(endpoint)
         return await self.connection_table[endpoint].get()
 
     def start_task(self, name: str, coro):
-        """启动后台任务"""
+        """启动后台任务（仅非SDK模式）"""
+        if self.sdk_mode:
+            return  # SDK模式下不需要任务管理
+
         if asyncio.iscoroutine(coro):
             self.task_table[name] = asyncio.create_task(coro)
         else:
@@ -165,7 +200,10 @@ class XConnector:
         logger.debug(f"Started task: {name}")
 
     def stop_task(self, name: str):
-        """停止后台任务"""
+        """停止后台任务（仅非SDK模式）"""
+        if self.sdk_mode:
+            return  # SDK模式下不需要任务管理
+
         if name in self.task_table:
             self.task_table[name].cancel()
             del self.task_table[name]
@@ -174,14 +212,15 @@ class XConnector:
     # === 核心功能 ===
     def _initialize_components(self):
         """初始化核心组件"""
-        # 注册内置适配器
-        self._register_builtin_adapters()
+        # 注册内置适配器（仅在非SDK模式下）
+        if not self.sdk_mode:
+            self._register_builtin_adapters()
 
         # 配置路由规则
         self._setup_routing_rules()
 
-        # 设置健康检查
-        if self.config.enable_health_check:
+        # 设置健康检查（仅在非SDK模式下）
+        if not self.sdk_mode and self.config.enable_health_check:
             self._setup_health_check()
 
     def _register_builtin_adapters(self):
@@ -219,22 +258,22 @@ class XConnector:
         """设置路由规则"""
         # 默认路由规则：inference -> cache
         self.router.add_route(
-            source_type=AdapterType.INFERENCE,
-            target_type=AdapterType.CACHE,
+            source_type="inference",
+            target_type="cache",
             handler=self._handle_inference_to_cache
         )
 
         # 反向路由：cache -> inference
         self.router.add_route(
-            source_type=AdapterType.CACHE,
-            target_type=AdapterType.INFERENCE,
+            source_type="cache",
+            target_type="inference",
             handler=self._handle_cache_to_inference
         )
 
         # 分布式路由
         self.router.add_route(
-            source_type=AdapterType.DISTRIBUTED,
-            target_type=AdapterType.INFERENCE,
+            source_type="distributed",
+            target_type="inference",
             handler=self._handle_distributed_to_inference
         )
 
@@ -248,7 +287,7 @@ class XConnector:
         """加载配置文件中的适配器"""
         for adapter_config in self.config.adapters:
             if adapter_config.enabled:
-                self.load_adapter(adapter_config)
+                asyncio.create_task(self.load_adapter(adapter_config))
 
     # === 公共 API ===
 
@@ -262,34 +301,81 @@ class XConnector:
         Returns:
             BaseInterface: 加载的适配器实例
         """
+        with self._lock:
+            adapter_name = adapter_config.name
+
+            try:
+                logger.info(f"Loading adapter: {adapter_name}")
+
+                # 检查是否已经加载
+                if adapter_name in self._loaded_modules:
+                    logger.warning(f"Adapter {adapter_name} is already loaded")
+
+                # 根据类路径加载类
+                adapter_class = self._load_class_from_path(adapter_config.class_path)
+
+                # 创建适配器实例（SDK模式下传入当前实例）
+                if self.sdk_mode:
+                    adapter_instance = adapter_class(self, adapter_config.config)
+                else:
+                    adapter_instance = adapter_class(adapter_config.config)
+
+                # 验证适配器接口
+                if not isinstance(adapter_instance, BaseInterface):
+                    raise TypeError(f"Adapter {adapter_name} must implement BaseInterface")
+
+                # 缓存实例
+                self._loaded_modules[adapter_name] = adapter_instance
+
+                # 根据类型注册到相应的注册表
+                adapter_type_value = adapter_config.type.value
+                if adapter_type_value == AdapterType.INFERENCE.value:
+                    self.inference_adapters[adapter_name] = adapter_instance
+                elif adapter_type_value == AdapterType.CACHE.value:
+                    self.cache_adapters[adapter_name] = adapter_instance
+                elif adapter_type_value == AdapterType.DISTRIBUTED.value:
+                    self.distributed_adapters[adapter_name] = adapter_instance
+                else:
+                    raise ValueError(f"Unknown adapter type: {adapter_type_value}")
+
+                # 注册到路由器
+                if hasattr(self, 'router'):
+                    self.router.register_adapter(adapter_name, adapter_instance)
+
+                logger.info(f"Successfully loaded adapter: {adapter_name} ({adapter_type_value})")
+                return adapter_instance
+
+            except Exception as e:
+                logger.error(f"Failed to load adapter {adapter_name}: {e}")
+                raise RuntimeError(f"Failed to load adapter {adapter_name}: {e}") from e
+
+    def _load_class_from_path(self, class_path: str) -> Type[BaseInterface]:
+        """
+        从类路径加载类
+
+        Args:
+            class_path: 类路径 (例如: "xconnector.adapters.vllm.VLLMAdapter")
+
+        Returns:
+            Type[BaseInterface]: 加载的类
+        """
         try:
-            # 确保插件管理器返回适配器实例
-            adapter_instance = await self.plugin_manager.load_adapter(adapter_config, self.core)
+            # 分离模块路径和类名
+            module_path, class_name = class_path.rsplit(".", 1)
 
-            # 确保我们有一个有效的适配器实例
-            if not adapter_instance:
-                raise ValueError(f"PluginManager returned None for adapter: {adapter_config.name}")
+            # 导入模块
+            module = importlib.import_module(module_path)
 
-            # 获取适配器类型的值
-            adapter_type_value = adapter_config.type.value
+            # 获取类
+            adapter_class = getattr(module, class_name)
 
-            # 根据类型注册到相应的注册表
-            if adapter_type_value == AdapterType.INFERENCE.value:
-                # 确保适配器被正确添加到字典
-                self.inference_adapters[adapter_config.name] = adapter_instance
-            elif adapter_type_value == AdapterType.CACHE.value:
-                self.cache_adapters[adapter_config.name] = adapter_instance
-            elif adapter_type_value == AdapterType.DISTRIBUTED.value:
-                self.distributed_adapters[adapter_config.name] = adapter_instance
-            else:
-                raise ValueError(f"Unknown adapter type: {adapter_type_value}")
+            if not inspect.isclass(adapter_class):
+                raise TypeError(f"{class_path} is not a class")
 
-            logger.info(f"Loaded adapter: {adapter_config.name} ({adapter_type_value})")
-            return adapter_instance
+            return adapter_class
 
-        except Exception as e:
-            logger.error(f"Failed to load adapter {adapter_config.name}: {e}")
-            raise
+        except (ImportError, AttributeError, ValueError) as e:
+            raise ImportError(f"Cannot import {class_path}: {e}") from e
 
     def unload_adapter(self, adapter_name: str, adapter_type: AdapterType) -> Optional[BaseInterface]:
         """
@@ -302,42 +388,47 @@ class XConnector:
         Returns:
             Optional[BaseInterface]: 卸载的适配器实例
         """
-        try:
-            adapter = None
-            adapter_type_value = adapter_type.value
+        with self._lock:
+            try:
+                adapter = None
+                adapter_type_value = adapter_type.value
 
-            # 从正确的字典中移除适配器
-            if adapter_type_value == AdapterType.INFERENCE.value:
-                adapter = self.inference_adapters.pop(adapter_name, None)
-            elif adapter_type_value == AdapterType.CACHE.value:
-                adapter = self.cache_adapters.pop(adapter_name, None)
-            elif adapter_type_value == AdapterType.DISTRIBUTED.value:
-                adapter = self.distributed_adapters.pop(adapter_name, None)
-            else:
-                logger.error(f"Unknown adapter type: {adapter_type_value}")
-                return None
+                # 从正确的字典中移除适配器
+                if adapter_type_value == AdapterType.INFERENCE.value:
+                    adapter = self.inference_adapters.pop(adapter_name, None)
+                elif adapter_type_value == AdapterType.CACHE.value:
+                    adapter = self.cache_adapters.pop(adapter_name, None)
+                elif adapter_type_value == AdapterType.DISTRIBUTED.value:
+                    adapter = self.distributed_adapters.pop(adapter_name, None)
+                else:
+                    logger.error(f"Unknown adapter type: {adapter_type_value}")
+                    return None
 
-            # 执行清理操作
-            if adapter:
-                if hasattr(adapter, 'cleanup'):
-                    adapter.cleanup()
+                # 从缓存中移除
+                if adapter_name in self._loaded_modules:
+                    del self._loaded_modules[adapter_name]
 
-                if hasattr(adapter, 'stop') and callable(adapter.stop):
-                    # 对于异步方法，我们只记录警告，不实际调用
-                    if asyncio.iscoroutinefunction(adapter.stop):
-                        logger.warning(f"Adapter {adapter_name} has async stop method, "
-                                       "but it cannot be called from unload_adapter. "
-                                       "Please call stop separately before unloading.")
-                    else:
-                        # 如果是同步方法，直接调用
-                        adapter.stop()
+                # 执行清理操作
+                if adapter:
+                    if hasattr(adapter, 'cleanup'):
+                        adapter.cleanup()
 
-            logger.info(f"Unloaded adapter: {adapter_name} ({adapter_type_value})")
-            return adapter
+                    if hasattr(adapter, 'stop') and callable(adapter.stop):
+                        # 对于异步方法，我们只记录警告，不实际调用
+                        if asyncio.iscoroutinefunction(adapter.stop):
+                            logger.warning(f"Adapter {adapter_name} has async stop method, "
+                                           "but it cannot be called from unload_adapter. "
+                                           "Please call stop separately before unloading.")
+                        else:
+                            # 如果是同步方法，直接调用
+                            adapter.stop()
 
-        except Exception as e:
-            logger.error(f"Failed to unload adapter {adapter_name}: {e}")
-            raise
+                logger.info(f"Unloaded adapter: {adapter_name} ({adapter_type_value})")
+                return adapter
+
+            except Exception as e:
+                logger.error(f"Failed to unload adapter {adapter_name}: {e}")
+                raise
 
     def get_adapter(self, adapter_name: str, adapter_type: AdapterType) -> Optional[BaseInterface]:
         """
@@ -412,9 +503,10 @@ class XConnector:
 
         self.is_running = True
 
-        # 启动健康检查任务
-        if hasattr(self, '_health_check_coro'):
+        # 启动健康检查任务（仅非SDK模式）
+        if not self.sdk_mode and hasattr(self, '_health_check_coro'):
             self.health_check_task = asyncio.create_task(self._health_check_coro)
+
         # 添加调试日志
         logger.debug("Starting XConnector...")
         logger.debug(f"Inference adapters: {list(self.inference_adapters.keys())}")
@@ -444,9 +536,10 @@ class XConnector:
 
         self.is_running = False
 
-        # 停止所有后台任务
-        for task_name in list(self.task_table.keys()):
-            self.stop_task(task_name)
+        # 停止所有后台任务（仅非SDK模式）
+        if not self.sdk_mode:
+            for task_name in list(self.task_table.keys()):
+                self.stop_task(task_name)
 
         # 停止健康检查
         if self.health_check_task:
@@ -469,16 +562,17 @@ class XConnector:
                     except Exception as e:
                         logger.error(f"Error stopping adapter {name}: {e}")
 
-        # 清理消息队列
-        for endpoint, queue in self.connection_table.items():
-            try:
-                # 清空队列
-                while not queue.empty():
-                    queue.get_nowait()
-            except Exception:
-                pass
+        # 清理消息队列（仅非SDK模式）
+        if not self.sdk_mode:
+            for endpoint, queue in self.connection_table.items():
+                try:
+                    # 清空队列
+                    while not queue.empty():
+                        queue.get_nowait()
+                except Exception:
+                    pass
 
-        self.connection_table.clear()
+            self.connection_table.clear()
 
         logger.info("XConnector stopped successfully")
 
@@ -489,17 +583,18 @@ class XConnector:
         status = {
             "connector": {
                 "status": "healthy" if self.is_running else "stopped",
+                "mode": "SDK" if self.sdk_mode else "standalone",
                 "adapters_count": {
                     "inference": len(self.inference_adapters),
                     "cache": len(self.cache_adapters),
                     "distributed": len(self.distributed_adapters)
                 },
-                "active_tasks": len(self.task_table),
-                "active_endpoints": len(self.connection_table)
+                "active_tasks": len(self.task_table) if not self.sdk_mode else 0,
+                "active_endpoints": len(self.connection_table) if not self.sdk_mode else 0
             },
             "adapters": {},
-            "tasks": list(self.task_table.keys()),
-            "endpoints": list(self.connection_table.keys())
+            "tasks": list(self.task_table.keys()) if not self.sdk_mode else [],
+            "endpoints": list(self.connection_table.keys()) if not self.sdk_mode else []
         }
 
         # 检查各个适配器的健康状态
@@ -530,12 +625,13 @@ class XConnector:
     def cleanup(self):
         """清理所有资源"""
         try:
-            # 清理任务
-            for task_name in list(self.task_table.keys()):
-                self.stop_task(task_name)
+            # 清理任务（仅非SDK模式）
+            if not self.sdk_mode:
+                for task_name in list(self.task_table.keys()):
+                    self.stop_task(task_name)
 
-            # 清理队列
-            self.connection_table.clear()
+                # 清理队列
+                self.connection_table.clear()
 
             # 清理适配器
             for adapters in [self.inference_adapters, self.cache_adapters, self.distributed_adapters]:
@@ -624,27 +720,31 @@ class XConnector:
 
 # === 便捷工厂函数 ===
 
-def create_connector(config: Optional[ConnectorConfig] = None) -> XConnector:
+def create_connector(config: Optional[ConnectorConfig] = None, sdk_mode: bool = False) -> XConnector:
     """
     创建 XConnector 实例的便捷函数
 
     Args:
         config: 连接器配置
+        sdk_mode: 是否为SDK模式
 
     Returns:
         XConnector: 连接器实例
     """
-    return XConnector(config)
+    return XConnector(config, sdk_mode=sdk_mode)
 
 
-def get_connector() -> XConnector:
+def get_connector(sdk_mode: bool = False) -> XConnector:
     """
     获取全局 XConnector 实例
+
+    Args:
+        sdk_mode: 是否为SDK模式
 
     Returns:
         XConnector: 全局连接器实例
     """
-    return XConnector()
+    return XConnector(sdk_mode=sdk_mode)
 
 
 # === 异步上下文管理器支持 ===
@@ -652,8 +752,8 @@ def get_connector() -> XConnector:
 class AsyncXConnector:
     """XConnector 的异步上下文管理器包装"""
 
-    def __init__(self, config: Optional[ConnectorConfig] = None):
-        self.connector = XConnector(config)
+    def __init__(self, config: Optional[ConnectorConfig] = None, sdk_mode: bool = False):
+        self.connector = XConnector(config, sdk_mode=sdk_mode)
 
     async def __aenter__(self):
         await self.connector.start()
@@ -671,7 +771,7 @@ if __name__ == "__main__":
 
     async def main():
         # 方式1: 直接使用
-        connector = create_connector()
+        connector = create_connector(sdk_mode=True)
         await connector.start()
 
         # 获取适配器
@@ -681,8 +781,8 @@ if __name__ == "__main__":
         # 路由消息
         if vllm_adapter and lmcache_adapter:
             result = await connector.route_message(
-                "vllm", "lmcache", "save_kv_layer",
-                "layer1", torch.randn(10, 10), None
+                "vllm", "lmcache", "store_kv",
+                "test_input", torch.randn(10, 10), torch.randn(5, 5)
             )
 
         # 检查健康状态
@@ -694,7 +794,7 @@ if __name__ == "__main__":
 
     async def main_with_context():
         # 方式2: 使用上下文管理器
-        async with AsyncXConnector() as connector:
+        async with AsyncXConnector(sdk_mode=True) as connector:
             # 使用连接器
             adapters = connector.list_adapters()
             print(f"Available adapters: {adapters}")

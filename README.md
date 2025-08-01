@@ -306,3 +306,18 @@ cp -r docker/configs/ backup/configs-$(date +%Y%m%d)/
 docker-compose pull
 docker-compose up -d
 ```
+
+# 9 使用方法
+```bash
+# 启动disagg模式（默认）
+DYNAMO_CONFIG_TYPE=disagg.yaml docker-compose -f deployments/docker/docker-compose.yml up dynamo-worker
+
+# 启动agg模式
+DYNAMO_CONFIG_TYPE=agg.yaml docker-compose -f deployments/docker/docker-compose.yml up dynamo-worker
+
+# 启动agg_router模式
+DYNAMO_CONFIG_TYPE=agg_router.yaml docker-compose -f deployments/docker/docker-compose.yml up dynamo-worker
+
+# 启动disagg_router模式
+DYNAMO_CONFIG_TYPE=disagg_router.yaml docker-compose -f deployments/docker/docker-compose.yml up dynamo-worker
+```

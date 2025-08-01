@@ -1,9 +1,83 @@
 version: '3.8'
 
 services:
+  dynamo-worker:
+    image: dynamo-nvidia:v0.3.0-vllm0.8.4-lmcache0.2.1-inline
+    container_name: dynamo-worker
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - ENABLE_XCONNECTOR=true
+      - XCONNECTOR_SERVICE_URL=http://xconnector-service:8081
+      - XCONNECTOR_FAIL_ON_ERROR=false
+      - ETCD_ENDPOINTS=http://etcd:2379
+      - ETCD_URL=http://etcd:2379
+      - ETCD_HOST=etcd
+      - ETCD_PORT=2379
+      - NATS_URL=nats://nats:4222
+      - NATS_SERVER=nats://nats:4222
+      - NATS_HOST=nats
+      - NATS_PORT=4222
+      - ETCD_USERNAME=
+      - ETCD_PASSWORD=
+      - ETCD_AUTH_TOKEN=
+      - PYTHONPATH=/workspace/examples/llm:/workspace/xconnector-integration:/workspace
+      - PATH=/opt/dynamo/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+      - LOG_LEVEL=INFO
+      - DYNAMO_CONFIG_TYPE=${DYNAMO_CONFIG_TYPE:-disagg.yaml}
+
+    networks:
+      - xconnector-net
+    
+    ports:
+      - "8000:8000"
+    
+    volumes:
+      - ../../integrations/dynamo/configs:/workspace/xconnector-configs:ro
+      - ./docker-optimized-launcher.sh:/workspace/docker-optimized-launcher.sh:ro
+      - ../../integrations/dynamo/startup-wrapper.py:/workspace/startup-wrapper.py:ro
+      - ../../integrations/dynamo/extension_loader.py:/tmp/extension_loader.py:ro
+      - ../../integrations/dynamo/registry.py:/tmp/registry.py:ro
+      - ../../integrations/dynamo/__init__.py:/tmp/__init__.py:ro
+      - xconnector-integration:/workspace/xconnector-integration
+      - dynamo-logs:/workspace/logs
+      - model-cache:/workspace/models
+      - /data/model:/data/model:ro
+
+    working_dir: /workspace/examples/llm
+
+    command: ["bash", "/workspace/docker-optimized-launcher.sh"]
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 300s
+    
+    restart: on-failure:5
+    
+    depends_on:
+      etcd:
+        condition: service_healthy
+      xconnector-service:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
   xconnector-service:
     image: xconnector-service:latest
     container_name: xconnector-service
+    
     environment:
       - ETCD_HOST=etcd
       - ETCD_PORT=2379
@@ -11,29 +85,41 @@ services:
       - XCONNECTOR_PORT=8081
       - LOG_LEVEL=INFO
       - PYTHONPATH=/app
+    
     networks:
       - xconnector-net
+    
     ports:
       - "8081:8081"
+    
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    
     volumes:
       - xconnector-logs:/app/logs
       - ../../integrations/dynamo/configs/xconnector_config.yaml:/app/configs/xconnector_config.yaml:ro
+    
     restart: unless-stopped
+    
     depends_on:
       - etcd
       - nats
 
   etcd:
-    image: bitnami/etcd:auth-online
+    image: bitnami/etcd:latest
     container_name: etcd
+    
     environment:
       - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ENABLE_V2=false
+      - ETCD_AUTH_TOKEN=
+      - ETCD_ROOT_PASSWORD=
+      - ETCD_USERNAME=
+      - ETCD_PASSWORD=
       - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
       - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
       - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
@@ -42,146 +128,60 @@ services:
       - ETCD_NAME=etcd
       - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
       - ETCD_INITIAL_CLUSTER_STATE=new
+      - BITNAMI_DEBUG=true
+      - ETCD_LOG_LEVEL=info
+    
     networks:
       - xconnector-net
+    
     ports:
       - "2379:2379"
       - "2380:2380"
+    
     volumes:
       - etcd-data:/bitnami/etcd/data
+    
+    command: >
+      sh -c "
+        echo 'Starting etcd in no-auth mode...';
+        export ALLOW_NONE_AUTHENTICATION=yes;
+        export ETCD_AUTH_TOKEN='';
+        export ETCD_ROOT_PASSWORD='';
+        /opt/bitnami/scripts/etcd/entrypoint.sh /opt/bitnami/scripts/etcd/run.sh
+      "
+    
+    healthcheck:
+      test: ["CMD", "pgrep", "etcd"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    
     restart: unless-stopped
 
   nats:
     image: nats:latest
     container_name: nats
+    
     networks:
       - xconnector-net
+    
     ports:
       - "4222:4222"
       - "8222:8222"
+    
     command: ["-js", "-m", "8222"]
-    restart: unless-stopped
-
-  dynamo-worker:
-    image: dynamo-nvidia:v0.3.0-vllm0.8.4-lmcache0.2.1-inline
-    container_name: dynamo-worker
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - ENABLE_XCONNECTOR=true
-      - XCONNECTOR_SERVICE_URL=http://xconnector-service:8081
-      - XCONNECTOR_FAIL_ON_ERROR=false
-      - ETCD_USERNAME=
-      - ETCD_PASSWORD=
-      - ETCD_USER=
-      - ETCD_AUTH_TOKEN=
-      - PYTHONPATH=/workspace:/opt/dynamo/examples/llm:/workspace/xconnector-integration
-      - PATH=/opt/dynamo/venv/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
-      - LOG_LEVEL=INFO
-    networks:
-      - xconnector-net
-    ports:
-      - "8000:8000"
-    volumes:
-      - ../../integrations/dynamo/configs/disagg_with_xconnector.yaml:/workspace/configs/disagg.yaml:ro
-      - ../../integrations/dynamo/startup-wrapper.py:/workspace/startup-wrapper.py:ro
-      - xconnector-integration:/workspace/xconnector-integration
-      - ../../integrations/dynamo/extension_loader.py:/tmp/extension_loader.py:ro
-      - ../../integrations/dynamo/registry.py:/tmp/registry.py:ro
-      - ../../integrations/dynamo/__init__.py:/tmp/__init__.py:ro
-      - dynamo-logs:/workspace/logs
-      - model-cache:/workspace/models
-    working_dir: /workspace/examples/llm
-    command: [
-      "bash", "-c",
-      "echo 'Creating simple proxy...' &&
-       python3 -c \"
-import socket, threading, sys
-
-def proxy(local_port, target_host, target_port):
-    def handle_client(client_socket):
-        try:
-            server_socket = socket.socket()
-            server_socket.connect((target_host, target_port))
-            def forward(src, dst):
-                while True:
-                    try:
-                        data = src.recv(4096)
-                        if not data: break
-                        dst.send(data)
-                    except: break
-            threading.Thread(target=forward, args=(client_socket, server_socket), daemon=True).start()
-            threading.Thread(target=forward, args=(server_socket, client_socket), daemon=True).start()
-        except Exception as e:
-            print(f'Proxy error: {e}')
-            client_socket.close()
     
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(('127.0.0.1', local_port))
-    server.listen(5)
-    print(f'Proxy {local_port} -> {target_host}:{target_port}')
-    while True:
-        client, addr = server.accept()
-        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
-
-if __name__ == '__main__':
-    proxy(int(sys.argv[1]), sys.argv[2], int(sys.argv[3]))
-\" 2379 etcd 2379 &
-       python3 -c \"
-import socket, threading, sys
-
-def proxy(local_port, target_host, target_port):
-    def handle_client(client_socket):
-        try:
-            server_socket = socket.socket()
-            server_socket.connect((target_host, target_port))
-            def forward(src, dst):
-                while True:
-                    try:
-                        data = src.recv(4096)
-                        if not data: break
-                        dst.send(data)
-                    except: break
-            threading.Thread(target=forward, args=(client_socket, server_socket), daemon=True).start()
-            threading.Thread(target=forward, args=(server_socket, client_socket), daemon=True).start()
-        except Exception as e:
-            print(f'Proxy error: {e}')
-            client_socket.close()
-    
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(('127.0.0.1', local_port))
-    server.listen(5)
-    print(f'Proxy {local_port} -> {target_host}:{target_port}')
-    while True:
-        client, addr = server.accept()
-        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
-
-if __name__ == '__main__':
-    proxy(int(sys.argv[1]), sys.argv[2], int(sys.argv[3]))
-\" 4222 nats 4222 &
-       sleep 3 &&
-       echo 'Waiting for XConnector...' &&
-       while ! curl -f http://xconnector-service:8081/health; do sleep 5; done &&
-       echo 'Setting up integration...' &&
-       mkdir -p /workspace/xconnector-integration &&
-       cp /tmp/extension_loader.py /workspace/xconnector-integration/ &&
-       cp /tmp/registry.py /workspace/xconnector-integration/ &&
-       cp /tmp/__init__.py /workspace/xconnector-integration/ &&
-       python /workspace/startup-wrapper.py &&
-       echo 'Starting Dynamo...' &&
-       /opt/dynamo/venv/bin/dynamo serve graphs.disagg:Frontend -f /workspace/configs/disagg.yaml"
-    ]
     restart: unless-stopped
-    depends_on:
-      - xconnector-service
-      - etcd
-      - nats
 
 networks:
   xconnector-net:
+    external: true
+    name: xconnector-dynamo_xconnector-net
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
 
 volumes:
   etcd-data:

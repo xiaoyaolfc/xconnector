@@ -4,6 +4,7 @@ VLLM Adapter for XConnector
 
 This adapter provides integration between vLLM inference engine and XConnector,
 enabling KV cache management and distributed inference capabilities.
+支持SDK嵌入模式和独立服务模式。
 """
 
 import asyncio
@@ -48,6 +49,7 @@ class VLLMAdapter(BaseAdapter):
 
     Handles integration between vLLM inference engine and cache systems,
     providing KV cache management and optimization.
+    支持SDK嵌入模式，直接集成到Dynamo Worker中。
     """
 
     __version__ = "1.0.0"
@@ -56,6 +58,9 @@ class VLLMAdapter(BaseAdapter):
 
     def __init__(self, core_instance=None, config: Dict[str, Any] = None):
         super().__init__(core_instance, config)
+
+        # 检测运行模式
+        self.sdk_mode = core_instance is not None and hasattr(core_instance, 'sdk_mode') and core_instance.sdk_mode
 
         # VLLM specific configuration
         self.model_name = config.get("model_name", "")
@@ -77,7 +82,10 @@ class VLLMAdapter(BaseAdapter):
         self.total_cache_queries = 0
         self.cache_hits = 0
 
-        logger.info(f"VLLMAdapter initialized with model: {self.model_name}")
+        # SDK模式下的缓存处理器引用
+        self._kv_handler = None
+
+        logger.info(f"VLLMAdapter initialized with model: {self.model_name} (SDK mode: {self.sdk_mode})")
 
     # === Required BaseInterface Methods ===
 
@@ -92,6 +100,17 @@ class VLLMAdapter(BaseAdapter):
                 logger.error("vLLM not installed")
                 return False
 
+            # SDK模式下获取KV处理器引用
+            if self.sdk_mode and self.core:
+                try:
+                    self._kv_handler = self.core.get_kv_handler() if hasattr(self.core, 'get_kv_handler') else None
+                    if self._kv_handler:
+                        logger.info("Connected to SDK KV handler")
+                    else:
+                        logger.warning("SDK KV handler not available")
+                except Exception as e:
+                    logger.warning(f"Failed to get SDK KV handler: {e}")
+
             # Initialize metrics
             self._reset_metrics()
 
@@ -104,7 +123,7 @@ class VLLMAdapter(BaseAdapter):
         """Start VLLM adapter services"""
         try:
             # Register with core if available
-            if self.core:
+            if self.core and not self.sdk_mode:
                 await self._register_routes()
 
             logger.info("VLLMAdapter started successfully")
@@ -137,7 +156,8 @@ class VLLMAdapter(BaseAdapter):
                 parameters={
                     "max_batch_size": self.max_batch_size,
                     "tensor_parallel": self.tensor_parallel_size,
-                    "prefix_caching": self.enable_prefix_caching
+                    "prefix_caching": self.enable_prefix_caching,
+                    "sdk_mode": self.sdk_mode
                 }
             ),
             "chunked_prefill": Capability(
@@ -169,6 +189,9 @@ class VLLMAdapter(BaseAdapter):
             # Calculate cache efficiency
             cache_efficiency = (self.cache_hits / max(self.total_cache_queries, 1)) * 100
 
+            # SDK模式下检查KV处理器连接
+            kv_handler_status = "connected" if self._kv_handler else "not_available"
+
             return HealthCheckResult(
                 status=HealthStatus.HEALTHY,
                 message="VLLM adapter is healthy",
@@ -177,7 +200,9 @@ class VLLMAdapter(BaseAdapter):
                     "active_requests": len(self.active_requests),
                     "finished_requests": len(self.finished_requests),
                     "cache_hit_rate": f"{cache_efficiency:.2f}%",
-                    "tensor_ops": "available"
+                    "tensor_ops": "available",
+                    "sdk_mode": self.sdk_mode,
+                    "kv_handler": kv_handler_status
                 }
             )
         except Exception as e:
@@ -188,8 +213,6 @@ class VLLMAdapter(BaseAdapter):
             )
 
     # === VLLM Core Methods ===
-
-    # 修复 xconnector/adapters/inference/vllm_adapter.py 中的 recv_kv_caches 方法
 
     async def recv_kv_caches(
             self,
@@ -220,47 +243,75 @@ class VLLMAdapter(BaseAdapter):
             # Check if we should retrieve from cache
             should_retrieve = await self._should_retrieve_cache(model_input)
 
-            if should_retrieve and self.core:
-                # Call cache adapter to retrieve KV
-                try:
-                    cache_result = await self.core.route_message(
-                        source="vllm",
-                        target="lmcache",
-                        method="retrieve_kv",
-                        model_input=model_input,
-                        kv_caches=kv_caches
-                    )
+            if should_retrieve:
+                # SDK模式：直接使用KV处理器
+                if self.sdk_mode and self._kv_handler:
+                    try:
+                        cache_result = await self._kv_handler.retrieve_kv(model_input, kv_caches)
 
-                    if cache_result and cache_result.get("found"):
-                        self.cache_hits += 1
-                        cached_kv = cache_result.get("kv_caches")
-                        skip_forward = cache_result.get("skip_forward", False)
-                        updated_input = cache_result.get("updated_input", model_input)
-                        hidden_states = cache_result.get("hidden_states")
+                        if cache_result.get("found"):
+                            self.cache_hits += 1
+                            hidden_states = cache_result.get("hidden_states")
+                            skip_forward = cache_result.get("skip_forward", False)
+                            updated_input = cache_result.get("updated_input", model_input)
 
-                        # 缓存命中的情况
-                        if skip_forward or hidden_states is not None:
-                            return hidden_states, skip_forward, updated_input
-                        elif cached_kv:
-                            # 有缓存的 KV，但需要继续执行模型
-                            merged_kv = self._merge_kv_caches(cached_kv, kv_caches)
-                            # 执行模型的前向传播
-                            hidden_states = await self._execute_model_forward(
-                                model_executable, updated_input, merged_kv
-                            )
-                            return hidden_states, False, updated_input
+                            # 缓存命中的情况
+                            if skip_forward or hidden_states is not None:
+                                logger.debug("SDK KV cache hit")
+                                return hidden_states, skip_forward, updated_input
+                            elif cache_result.get("kv_caches"):
+                                # 有缓存的 KV，但需要继续执行模型
+                                cached_kv = cache_result.get("kv_caches")
+                                merged_kv = self._merge_kv_caches(cached_kv, kv_caches)
+                                # 执行模型的前向传播
+                                hidden_states = await self._execute_model_forward(
+                                    model_executable, updated_input, merged_kv
+                                )
+                                return hidden_states, False, updated_input
+                    except Exception as e:
+                        logger.debug(f"SDK KV cache retrieval failed: {e}")
 
-                except Exception as e:
-                    logger.error(f"Cache retrieval failed: {e}")
+                # 独立模式：通过路由器调用缓存适配器
+                elif not self.sdk_mode and self.core:
+                    try:
+                        cache_result = await self.core.route_message(
+                            source="vllm",
+                            target="lmcache",
+                            method="retrieve_kv",
+                            model_input=model_input,
+                            kv_caches=kv_caches
+                        )
+
+                        if cache_result and cache_result.get("found"):
+                            self.cache_hits += 1
+                            cached_kv = cache_result.get("kv_caches")
+                            skip_forward = cache_result.get("skip_forward", False)
+                            updated_input = cache_result.get("updated_input", model_input)
+                            hidden_states = cache_result.get("hidden_states")
+
+                            # 缓存命中的情况
+                            if skip_forward or hidden_states is not None:
+                                logger.debug("Route KV cache hit")
+                                return hidden_states, skip_forward, updated_input
+                            elif cached_kv:
+                                # 有缓存的 KV，但需要继续执行模型
+                                merged_kv = self._merge_kv_caches(cached_kv, kv_caches)
+                                # 执行模型的前向传播
+                                hidden_states = await self._execute_model_forward(
+                                    model_executable, updated_input, merged_kv
+                                )
+                                return hidden_states, False, updated_input
+                    except Exception as e:
+                        logger.debug(f"Route KV cache retrieval failed: {e}")
 
             # 缓存未命中的情况：不执行模型前向传播，返回 None
             # 这表示需要由调用者来执行正常的推理流程
-            self.cache_hits += 0  # 未命中
+            logger.debug("KV cache miss, proceeding with normal inference")
             return None, False, model_input
 
         except Exception as e:
             self.log_error(e, {"operation": "recv_kv_caches"})
-            return None, True, model_input  # 出错时跳过前向传播
+            return None, False, model_input  # 出错时继续正常流程
 
     async def send_kv_caches(
             self,
@@ -287,20 +338,50 @@ class VLLMAdapter(BaseAdapter):
             # Check if we should store to cache
             should_store = await self._should_store_cache(model_input)
 
-            if should_store and self.core:
-                # Call cache adapter to store KV
-                await self.core.route_message(
-                    source="vllm",
-                    target="lmcache",
-                    method="store_kv",
-                    model_input=model_input,
-                    kv_caches=kv_caches,
-                    hidden_states=hidden_or_intermediate_states
-                )
+            if should_store:
+                # SDK模式：直接使用KV处理器
+                if self.sdk_mode and self._kv_handler:
+                    try:
+                        success = await self._kv_handler.store_kv(
+                            model_input,
+                            kv_caches,
+                            hidden_or_intermediate_states,
+                            metadata={
+                                'timestamp': asyncio.get_event_loop().time(),
+                                'model_name': self.model_name,
+                                'tensor_parallel_size': self.tensor_parallel_size
+                            }
+                        )
 
-                # Update request tracking
-                if request_id in self.active_requests:
-                    self.active_requests[request_id].kv_cached = True
+                        if success:
+                            logger.debug("Successfully stored KV to SDK cache")
+                            # Update request tracking
+                            if request_id in self.active_requests:
+                                self.active_requests[request_id].kv_cached = True
+                        else:
+                            logger.debug("Failed to store KV to SDK cache")
+                    except Exception as e:
+                        logger.warning(f"SDK KV storage failed: {e}")
+
+                # 独立模式：通过路由器调用缓存适配器
+                elif not self.sdk_mode and self.core:
+                    try:
+                        await self.core.route_message(
+                            source="vllm",
+                            target="lmcache",
+                            method="store_kv",
+                            model_input=model_input,
+                            kv_caches=kv_caches,
+                            hidden_states=hidden_or_intermediate_states
+                        )
+
+                        # Update request tracking
+                        if request_id in self.active_requests:
+                            self.active_requests[request_id].kv_cached = True
+
+                        logger.debug("Successfully stored KV via route")
+                    except Exception as e:
+                        logger.warning(f"Route KV storage failed: {e}")
 
         except Exception as e:
             self.log_error(e, {"operation": "send_kv_caches"})
@@ -328,13 +409,27 @@ class VLLMAdapter(BaseAdapter):
                     del self.active_requests[req_id]
 
             # Notify cache system about finished requests
-            if self.core and finished_req_ids:
-                await self.core.route_message(
-                    source="vllm",
-                    target="lmcache",
-                    method="cleanup_finished",
-                    request_ids=finished_req_ids
-                )
+            if finished_req_ids:
+                # SDK模式：直接使用KV处理器
+                if self.sdk_mode and self._kv_handler:
+                    try:
+                        cleaned_count = await self._kv_handler.cleanup_finished(list(finished_req_ids))
+                        logger.debug(f"SDK cleaned {cleaned_count} cache entries for {len(finished_req_ids)} requests")
+                    except Exception as e:
+                        logger.warning(f"SDK cache cleanup failed: {e}")
+
+                # 独立模式：通过路由器
+                elif not self.sdk_mode and self.core:
+                    try:
+                        await self.core.route_message(
+                            source="vllm",
+                            target="lmcache",
+                            method="cleanup_finished",
+                            request_ids=finished_req_ids
+                        )
+                        logger.debug(f"Route cleaned cache for {len(finished_req_ids)} requests")
+                    except Exception as e:
+                        logger.warning(f"Route cache cleanup failed: {e}")
 
             return finished_req_ids, None
 
@@ -436,8 +531,8 @@ class VLLMAdapter(BaseAdapter):
         return torch.randn(batch_size, seq_len, hidden_size)
 
     async def _register_routes(self):
-        """Register routes with the core router"""
-        if not self.core:
+        """Register routes with the core router (独立模式)"""
+        if not self.core or self.sdk_mode:
             return
 
         # Register this adapter with the core
@@ -461,7 +556,9 @@ class VLLMAdapter(BaseAdapter):
             "cache_hits": self.cache_hits,
             "model_name": self.model_name,
             "tensor_parallel": self.tensor_parallel_size,
-            "prefix_caching": self.enable_prefix_caching
+            "prefix_caching": self.enable_prefix_caching,
+            "sdk_mode": self.sdk_mode,
+            "kv_handler_available": self._kv_handler is not None
         }
 
     # === Public API Methods ===
@@ -492,5 +589,24 @@ class VLLMAdapter(BaseAdapter):
             "hit_rate": f"{(self.cache_hits / max(self.total_cache_queries, 1)) * 100:.2f}%",
             "active_cached_requests": sum(
                 1 for req in self.active_requests.values() if req.kv_cached
-            )
+            ),
+            "mode": "SDK" if self.sdk_mode else "standalone",
+            "kv_handler_connected": self._kv_handler is not None
+        }
+
+    # === SDK集成特定方法 ===
+
+    def set_kv_handler(self, kv_handler) -> None:
+        """设置KV处理器引用（SDK模式下使用）"""
+        self._kv_handler = kv_handler
+        logger.info("KV handler reference updated")
+
+    def get_sdk_info(self) -> Dict[str, Any]:
+        """获取SDK集成信息"""
+        return {
+            "sdk_mode": self.sdk_mode,
+            "kv_handler_available": self._kv_handler is not None,
+            "core_available": self.core is not None,
+            "adapter_name": self.adapter_name,
+            "adapter_version": self.adapter_version
         }
