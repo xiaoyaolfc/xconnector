@@ -166,10 +166,10 @@ xconnector/
 │   └── exceptions.py        # SDK异常
 ├── integrations/
 │   └── dynamo/
-│       ├── sdk_integration.py    # SDK集成
-│       ├── worker_wrapper.py     # Worker包装
-│       ├── config_bridge.py      # 配置桥接
-│       └── lifecycle_manager.py  # 生命周期管理
+│       ├── autopatch.py          # 自动monkey patch
+│       ├── config_detector.py    # 配置文件检测
+│       ├── worker_injector.py    # Worker方法注入
+│       └── minimal_sdk.py        # 最小SDK封装
 └── core/
     ├── connector.py         # 保持兼容，重构内部实现
     └── ...                  # 其他核心组件
@@ -197,37 +197,43 @@ xconnector/
 1. **初始化集成**
    ```python
    # 在Dynamo Worker初始化时
-   from xconnector.integrations.dynamo import setup_xconnector_integration
-   
-   def initialize_worker(config):
-       # 原有初始化逻辑
-       worker = VLLMWorker(config)
-       
-       # XConnector集成
-       if config.get('enable_xconnector', False):
-           setup_xconnector_integration(worker, config)
-       
-       return worker
+   # worker.py
+    import xconnector.integrations.dynamo.autopatch  # 添加这一行
+    
+    # 其他原有代码保持不变
+    import os
+    import sys
+    from vllm_worker import VLLMWorker
+    
+    def main():
+        # 原有逻辑不变
+        config = load_config()
+        worker = VLLMWorker(config)
+        worker.start()
+    
+    if __name__ == "__main__":
+        main()
    ```
 
-2. **方法包装**
-   ```python
+2. **修改配置文件**
+   ```yaml
    # 自动包装关键方法
-   def setup_xconnector_integration(worker, config):
-       integration = DynamoXConnectorIntegration(config)
-       integration.inject_into_worker(worker)
+   Common:
+      model: /your/model/path
+      # 其他原有配置...
+      
+      # 新增XConnector配置
+      xconnector:
+        enabled: true
+        adapters:
+          - name: lmcache
+            type: cache
+    
+    VllmWorker:
+      # 原有配置保持不变
+      enable-prefix-caching: true
    ```
 
-3. **配置传递**
-   ```python
-   # 从Dynamo配置提取XConnector配置
-   def extract_xconnector_config(dynamo_config):
-       return {
-           'adapters': dynamo_config.get('xconnector_adapters', []),
-           'cache_config': dynamo_config.get('cache_config', {}),
-           'distributed_config': dynamo_config.get('distributed_config', {})
-       }
-   ```
 
 ### 3.3 第三阶段：优化与完善
 

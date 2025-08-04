@@ -11,8 +11,6 @@ import logging
 from typing import Any, Dict, List, Optional, Union, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-
-from xconnector.utils.xconnector_logging import get_logger
 from xconnector.utils.xconnector_logging import get_logger
 from xconnector.core.connector import XConnector
 from xconnector.config import ConnectorConfig, AdapterConfig, AdapterType, SDKConfig, SDKMode

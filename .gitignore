@@ -22,6 +22,7 @@ Thumbs.db
 .env
 xconnector-recovered-backup/
 rebuild/
+xconnector.egg-info/
 
 # 日志排除
 *.log
@@ -31,4 +32,3 @@ log/
 
 # docker排除
 docker-images/
-xconnector-deployment-20250723_143424/

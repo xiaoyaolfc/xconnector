@@ -4,25 +4,111 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xconnector"
-version = "0.1.0"
-description = "A sdk for self inference engine"
+version = "1.0.0"
+description = "XConnector SDK for distributed inference systems"
 authors = [
-    {name = "xxx", email = "xxx@gmail.com"}
+    {name = "xiaoyaolfc", email = "your-email@example.com"}
 ]
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
+
+# 核心依赖
 dependencies = [
-    # 可以添加项目依赖，例如 pytest-asyncio（解决之前的asyncio警告）
+    "torch>=2.0.0",
+    "numpy>=1.21.0",
+    "pydantic>=2.0.0",
+    "PyYAML>=6.0",
+    "asyncio-mqtt>=0.11.0",
+    "aiofiles>=23.0.0",
+    "httpx>=0.24.0",
+    "requests>=2.28.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "psutil>=5.9.0",
     "pytest-asyncio>=0.23.0",
 ]
 
-[project.urls]
-# 可选：添加项目链接（如主页、源码），格式例如：
-# Homepage = "https://example.com"
-
-# 修正这里！正确的pytest配置section格式
-[tool.pytest.ini_options]
-pythonpath = [
-    ".",  # 将项目根目录添加到Python路径，解决导入问题
+# 可选依赖
+[project.optional-dependencies]
+lmcache = ["lmcache>=0.1.0"]
+vllm = ["vllm>=0.2.0"]
+dynamo = ["ai-dynamo>=0.1.0"]
+redis = ["redis>=4.5.0", "etcd3-py>=0.1.6"]
+messaging = ["nats-py>=2.3.0"]
+monitoring = ["prometheus-client>=0.17.0"]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
 ]
+all = [
+    "lmcache>=0.1.0",
+    "vllm>=0.2.0",
+    "redis>=4.5.0",
+    "etcd3-py>=0.1.6",
+    "nats-py>=2.3.0",
+    "prometheus-client>=0.17.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/xiaoyaolfc/xconnector"
+Repository = "https://github.com/xiaoyaolfc/xconnector"
+Issues = "https://github.com/xiaoyaolfc/xconnectorissues"
+#Documentation = "https://xconnector.readthedocs.io/"
+
+# 入口点 - 如果需要CLI工具
+[project.scripts]
+xconnector = "xconnector.cli:main"
+
+# setuptools 配置
+[tool.setuptools]
+packages = ["xconnector"]
+
+[tool.setuptools.package-data]
+xconnector = ["configs/*.yaml", "configs/*.json"]
+
+# pytest 配置
+[tool.pytest.ini_options]
+pythonpath = ["."]
+minversion = "6.0"
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--tb=short",
+    "--asyncio-mode=auto",
+    "-v"
+]
+testpaths = ["tests"]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "e2e: End-to-end tests",
+    "slow: Slow running tests",
+    "cache: Cache related tests",
+    "inference: Inference related tests",
+    "distributed: Distributed system tests",
+]
+asyncio_mode = "auto"
+
+# Black 代码格式化配置
+[tool.black]
+line-length = 100
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
