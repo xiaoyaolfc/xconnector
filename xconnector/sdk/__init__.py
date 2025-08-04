@@ -13,48 +13,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from xconnector.utils.xconnector_logging import get_logger
-from xconnector.core.connector import XConnector, AdapterConfig, AdapterType
-from xconnector.utils.config import ConnectorConfig
+from xconnector.utils.xconnector_logging import get_logger
+from xconnector.core.connector import XConnector
+from xconnector.config import ConnectorConfig, AdapterConfig, AdapterType, SDKConfig, SDKMode
 
 logger = get_logger(__name__)
-
-
-class SDKMode(Enum):
-    """SDK运行模式"""
-    EMBEDDED = "embedded"  # 嵌入模式：完全集成到宿主进程
-    HYBRID = "hybrid"  # 混合模式：部分功能独立，部分嵌入
-
-
-@dataclass
-class SDKConfig:
-    """SDK配置类"""
-    mode: SDKMode = SDKMode.EMBEDDED
-
-    # 功能开关
-    enable_kv_cache: bool = True
-    enable_distributed: bool = True
-    enable_monitoring: bool = True
-
-    # 适配器配置
-    adapters: List[Dict[str, Any]] = field(default_factory=list)
-
-    # 集成配置
-    integration: Dict[str, Any] = field(default_factory=dict)
-
-    # 性能配置
-    performance: Dict[str, Any] = field(default_factory=lambda: {
-        "async_mode": True,
-        "batch_processing": True,
-        "memory_optimization": True
-    })
-
-    # 错误处理配置
-    error_handling: Dict[str, Any] = field(default_factory=lambda: {
-        "graceful_degradation": True,
-        "error_isolation": True,
-        "fallback_enabled": True
-    })
-
 
 class XConnectorSDK:
     """

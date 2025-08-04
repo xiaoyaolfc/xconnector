@@ -12,29 +12,10 @@ import inspect
 from xconnector.core.plugin_manager import PluginManager
 from xconnector.core.router import Router
 from xconnector.interfaces.base_interface import BaseInterface
-from xconnector.utils.config import ConnectorConfig
+from xconnector.config import ConnectorConfig, AdapterConfig, AdapterType
 from xconnector.utils.xconnector_logging import get_logger
 
 logger = get_logger(__name__)
-
-
-class AdapterType(Enum):
-    """适配器类型枚举"""
-    INFERENCE = "inference"
-    CACHE = "cache"
-    DISTRIBUTED = "distributed"
-
-
-@dataclass
-class AdapterConfig:
-    """适配器配置"""
-    name: str
-    type: AdapterType
-    class_path: str
-    config: Dict[str, Any]
-    enabled: bool = True
-    priority: int = 0  # 优先级，数字越小优先级越高
-
 
 class XConnector:
     """

@@ -8,7 +8,8 @@ XConnector SDK 工厂函数
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
 
-from xconnector.sdk import XConnectorSDK, SDKConfig, SDKMode
+from xconnector.sdk import XConnectorSDK
+from xconnector.config import SDKConfig, SDKMode
 from xconnector.utils.xconnector_logging import get_logger
 
 logger = get_logger(__name__)

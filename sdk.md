@@ -335,31 +335,26 @@ class VLLMWorkerWithXConnector(VLLMWorker):
 - 性能测试：对比服务模式
 - 兼容测试：确保向后兼容
 
-## 6. 风险与挑战
+## 5.4 pip包生成与发布
 
-### 6.1 技术风险
-- **进程内资源竞争**：需要合理的资源管理
-- **错误隔离**：避免XConnector错误影响Dynamo
-- **性能影响**：确保不影响推理性能
+### 1. 安装构建工具
+```bash
+pip install build twine
+```
 
-### 6.2 应对策略
-- 使用异步编程减少阻塞
-- 实现错误隔离和优雅降级
-- 提供详细的性能监控和调优
+### 2. 构建包
+```bash
+python -m build
+```
 
-## 7. 预期收益
+### 3. 会生成dist目录
+```bash
+dist/
+├── xconnector-1.0.0-py3-none-any.whl
+└── xconnector-1.0.0.tar.gz
+```
 
-### 7.1 部署简化
-- 减少Docker镜像和容器数量
-- 简化网络配置
-- 降低运维复杂度
-
-### 7.2 性能提升
-- 消除HTTP通信开销
-- 减少序列化/反序列化
-- 更高效的内存使用
-
-### 7.3 集成深度
-- 更紧密的Dynamo集成
-- 更好的错误处理
-- 更丰富的监控信息
+### 4. 本地安装测试
+```bash
+pip install dist/xconnector-1.0.0-py3-none-any.whl
+```
