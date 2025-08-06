@@ -1,39 +1,30 @@
-# Dynamo 配置文件 - 聚合模式集成 XConnector
-# 适用于聚合推理场景
-
 Common:
-  model: /data/model/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
-  block-size: 64
-  max-model-len: 16384
-
-  # XConnector 服务地址配置
-  etcd-endpoints: ["http://etcd:2379"]
-  etcd-url: "http://etcd:2379"
-  nats-url: "nats://nats:4222"
-  nats-server: "nats://nats:4222"
+  model: /data/model/DeepSeek-R1-Distill-Llama-8B  # 🔧 使用小模型
+  block-size: 32                                    # 🔧 减少块大小节省内存
+  max-model-len: 8192                              # 🔧 减少最大长度
 
 Frontend:
-  served_model_name: DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
+  served_model_name: DeepSeek-R1-Distill-Llama-8B
   endpoint: dynamo.Processor.chat/completions
   port: 8000
-  common-configs: [etcd-endpoints, etcd-url, nats-url, nats-server]
 
 Processor:
   router: round-robin
-  router-num-threads: 4
-  common-configs: [model, block-size, max-model-len, etcd-endpoints, etcd-url, nats-url, nats-server]
+  router-num-threads: 2                            # 🔧 减少线程数
+  common-configs: [model, block-size, max-model-len]
 
 VllmWorker:
   enforce-eager: true
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
+  max-num-batched-tokens: 8192                     # 🔧 减少批处理大小
+  enable-prefix-caching: true                      # ✅ 小模型可以启用
+  gpu-memory-utilization: 0.85                     # 🔧 适度的内存利用率
+  max-num-seqs: 8                                  # 🔧 适中的并发数
   ServiceArgs:
     workers: 1
     resources:
       gpu: '8'
-  common-configs: [model, block-size, max-model-len, etcd-endpoints, etcd-url, nats-url, nats-server]
+  common-configs: [model, block-size, max-model-len]
 
 Planner:
   environment: local
   no-operation: true
-  common-configs: [etcd-endpoints, etcd-url, nats-url, nats-server]

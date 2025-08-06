@@ -23,6 +23,7 @@ Thumbs.db
 xconnector-recovered-backup/
 rebuild/
 xconnector.egg-info/
+package.sh
 
 # 日志排除
 *.log

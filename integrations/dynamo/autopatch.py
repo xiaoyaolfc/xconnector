@@ -25,6 +25,239 @@ import threading
 from typing import Dict, Any, Optional
 import inspect
 
+# 离线环境依赖检测
+def check_optional_dependencies():
+    """检测可选依赖，缺失时返回 None"""
+    deps = {}
+
+    # 检查 etcd3
+    try:
+        import etcd3
+        deps['etcd3'] = etcd3
+    except ImportError:
+        deps['etcd3'] = None
+        logging.warning("etcd3 not available, etcd functionality disabled")
+
+    # 检查 nats
+    try:
+        import nats
+        deps['nats'] = nats
+    except ImportError:
+        deps['nats'] = None
+        logging.warning("nats not available, NATS functionality disabled")
+
+    # 检查 aiohttp
+    try:
+        import aiohttp
+        deps['aiohttp'] = aiohttp
+    except ImportError:
+        deps['aiohttp'] = None
+        logging.warning("aiohttp not available, HTTP client disabled")
+
+    # 检查 aiofiles
+    try:
+        import aiofiles
+        deps['aiofiles'] = aiofiles
+    except ImportError:
+        deps['aiofiles'] = None
+        logging.warning("aiofiles not available, async file I/O disabled")
+
+    return deps
+
+
+# 全局依赖状态
+OPTIONAL_DEPS = check_optional_dependencies()
+
+
+def is_offline_mode():
+    """检查是否在离线模式"""
+    return any(dep is None for dep in OPTIONAL_DEPS.values())
+
+
+# 2. 修改服务连接检查函数
+def _detect_dynamo_environment() -> bool:
+    """
+    检测是否在Dynamo环境中运行 (离线版本)
+    """
+    try:
+        # 方法1: 检查环境变量
+        dynamo_env_vars = [
+            'DYNAMO_WORKER', 'DYNAMO_CONFIG', 'DYNAMO_MODE',
+            'VLLM_WORKER', 'PREFILL_WORKER'
+        ]
+
+        for env_var in dynamo_env_vars:
+            if os.getenv(env_var):
+                logger.debug(f"Detected Dynamo environment via {env_var}")
+                return True
+
+        # 方法2: 检查调用栈
+        for frame_info in inspect.stack():
+            filename = frame_info.filename.lower()
+            if any(keyword in filename for keyword in ['dynamo', 'vllm_worker', 'worker']):
+                logger.debug(f"Detected Dynamo environment via call stack: {filename}")
+                return True
+
+        # 方法3: 检查配置文件（离线安全版本）
+        try:
+            from .config_detector import detect_config_files
+            config_files = detect_config_files()
+            if config_files:
+                logger.debug(f"Detected Dynamo environment via config files")
+                return True
+        except ImportError:
+            # config_detector 不可用时的回退检查
+            config_paths = [
+                '/workspace/configs/',
+                '/app/configs/',
+                './configs/'
+            ]
+            for path in config_paths:
+                if os.path.exists(path):
+                    config_files = [f for f in os.listdir(path) if f.endswith('.yaml')]
+                    if config_files:
+                        logger.debug(f"Found config files in {path}")
+                        return True
+
+        # 方法4: 检查命令行参数
+        if any('dynamo' in arg.lower() or 'worker' in arg.lower() for arg in sys.argv):
+            logger.debug("Detected Dynamo environment via command line args")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.debug(f"Error detecting Dynamo environment: {e}")
+        return False
+
+
+# 3. 安全的服务连接检查
+def safe_check_services():
+    """安全的服务连接检查 (支持多主机名)"""
+    import socket
+
+    def check_service_multiple_hosts(service_name, port, hosts):
+        """尝试多个主机名/IP"""
+        for host in hosts:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(3)
+                result = sock.connect_ex((host, port))
+                sock.close()
+                if result == 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    # 尝试多个可能的地址
+    etcd_hosts = ['127.0.0.1', 'localhost', 'etcd', 'etcd-server']
+    nats_hosts = ['127.0.0.1', 'localhost', 'nats', 'nats-server']
+
+    services = {
+        'etcd': check_service_multiple_hosts('etcd', 2379, etcd_hosts),
+        'nats': check_service_multiple_hosts('nats', 4222, nats_hosts)
+    }
+
+    return services
+
+
+# 4. 修改 _initialize_minimal_sdk 函数以适配离线模式
+def _initialize_minimal_sdk(config: Dict[str, Any]) -> bool:
+    """
+    初始化最小化的XConnector SDK (离线适配版本)
+    """
+    global _minimal_sdk
+
+    try:
+        # 检查是否在离线模式
+        if is_offline_mode():
+            logger.info("🔧 离线模式：使用简化的 SDK 初始化")
+            config = config.copy()
+            config['offline_mode'] = True
+
+            # 禁用需要外部依赖的功能
+            if OPTIONAL_DEPS['etcd3'] is None:
+                config.setdefault('etcd', {})['enabled'] = False
+            if OPTIONAL_DEPS['nats'] is None:
+                config.setdefault('nats', {})['enabled'] = False
+
+        # 延迟导入，避免循环依赖
+        from .minimal_sdk import MinimalXConnectorSDK
+
+        # 创建最小SDK实例
+        _minimal_sdk = MinimalXConnectorSDK(config)
+
+        # 同步初始化（离线模式避免复杂的异步操作）
+        if hasattr(_minimal_sdk, 'initialize_sync'):
+            _minimal_sdk.initialize_sync()
+            logger.info("✅ XConnector SDK 同步初始化完成")
+        else:
+            logger.info("✅ XConnector SDK 创建完成")
+
+        return True
+
+    except ImportError as e:
+        logger.error(f"✗ Failed to import XConnector components: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"✗ Failed to initialize minimal XConnector SDK: {e}")
+        return False
+
+
+# 5. 创建离线模式的配置检测器
+"""
+config_detector.py 的离线适配版本
+"""
+
+
+def detect_config_files_offline():
+    """离线安全的配置文件检测"""
+    import os
+    from pathlib import Path
+
+    # 可能的配置路径
+    possible_paths = [
+        Path('/workspace/configs/'),
+        Path('/app/configs/'),
+        Path('./configs/'),
+        Path.cwd() / 'configs',
+    ]
+
+    found_files = []
+    for path in possible_paths:
+        if path.exists() and path.is_dir():
+            config_files = list(path.glob('*.yaml')) + list(path.glob('*.yml'))
+            found_files.extend(config_files)
+
+    return found_files
+
+
+def detect_xconnector_config_offline():
+    """离线安全的 XConnector 配置检测"""
+    import yaml
+
+    config_files = detect_config_files_offline()
+
+    for config_file in config_files:
+        try:
+            with open(config_file, 'r') as f:
+                config = yaml.safe_load(f)
+
+            # 检查是否包含 XConnector 配置
+            if isinstance(config, dict):
+                if 'xconnector' in config:
+                    return config['xconnector']
+                # 检查是否有 XConnector 相关的键
+                xconnector_keys = [k for k in config.keys() if 'xconnector' in k.lower()]
+                if xconnector_keys:
+                    return {key: config[key] for key in xconnector_keys}
+
+        except Exception as e:
+            continue
+
+    return None
+
 
 # 获取logger
 def _get_logger():

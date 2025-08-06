@@ -1,0 +1,33 @@
+xconnector:
+  enabled: true
+  mode: "embedded" 
+  offline_mode: true
+  
+  # 明确禁用外部服务
+  etcd:
+    enabled: false
+  
+  nats:
+    enabled: false
+    
+  distributed:
+    enabled: false
+  
+  # 基础适配器配置
+  adapters:
+    - name: "minimal_cache"
+      type: "cache" 
+      class_path: "xconnector.adapters.cache.memory_cache_adapter.MemoryCacheAdapter"
+      config:
+        max_size: 1024
+      enabled: true
+  
+  # 日志配置
+  logging:
+    level: "INFO"
+    console: true
+    
+  # 故障处理
+  fault_tolerance:
+    graceful_degradation: true
+    fail_on_error: false
