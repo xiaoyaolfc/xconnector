@@ -437,7 +437,116 @@ for i in {1..3}; do
   echo "---"
 done
 ```
+### 9. 启动前的XConnector准备工作
 
+#### 9.1 设置XConnector环境变量（每次启动容器后必做）
+
+```bash# 在容器内执行
+export XCONNECTOR_CONFIG_FILE=/workspace/configs/dynamo-xconnector.yaml
+export ENABLE_XCONNECTOR=true
+export XCONNECTOR_ENABLED=true
+
+# 验证环境变量
+echo "XConnector配置文件: $XCONNECTOR_CONFIG_FILE"
+```
+
+#### 9.2 验证XConnector集成状态
+```bash# 快速验证集成状态
+# 快速验证 - 如果看到"PERFECT! XConnector is fully operational!"就说明准备就绪
+python3 -c "
+import sys
+sys.path.insert(0, '/workspace/xconnector')
+from integrations.dynamo.autopatch import get_integration_status, get_minimal_sdk
+status = get_integration_status()
+if all([status.get('sdk_available'), status.get('config_found')]):
+    sdk = get_minimal_sdk()
+    if sdk and sdk.cache_adapter:
+        stats = sdk.cache_adapter.get_cache_statistics()
+        if stats.get('connector_class_available'):
+            print('PERFECT! XConnector is fully operational!')
+        else:
+            print('WARNING: Connector not ready')
+    else:
+        print('ERROR: Cache adapter missing')
+else:
+    print('ERROR: Basic integration failed')
+"
+```
+
+```bash
+# Test the completely fixed SDK
+python3 << 'PYEOF'
+import sys
+sys.path.insert(0, '/workspace/xconnector')
+
+print('Testing completely fixed SDK...')
+
+try:
+    # Clear any cached imports
+    import importlib
+    if 'integrations.dynamo.minimal_sdk' in sys.modules:
+        importlib.reload(sys.modules['integrations.dynamo.minimal_sdk'])
+    if 'integrations.dynamo.autopatch' in sys.modules:
+        importlib.reload(sys.modules['integrations.dynamo.autopatch'])
+    
+    from integrations.dynamo.autopatch import get_integration_status
+    status = get_integration_status()
+    
+    print('Integration Status:')
+    for key, value in status.items():
+        status_icon = 'SUCCESS' if value else 'FAILED'
+        print(f'   {status_icon}: {key}: {value}')
+    
+    if status.get('sdk_available'):
+        from integrations.dynamo.autopatch import get_minimal_sdk
+        sdk = get_minimal_sdk()
+        
+        print(f'\nSDK instance: {type(sdk)}')
+        print(f'SDK has cache_adapter: {hasattr(sdk, "cache_adapter")}')
+        print(f'Cache adapter is not None: {sdk.cache_adapter is not None}')
+        
+        if hasattr(sdk, 'cache_adapter') and sdk.cache_adapter:
+            print('Cache adapter found! Getting statistics...')
+            try:
+                cache_stats = sdk.cache_adapter.get_cache_statistics()
+                print('Cache Adapter Status:')
+                for key, value in cache_stats.items():
+                    print(f'   {key}: {value}')
+                
+                connector_available = cache_stats.get('connector_class_available', False)
+                real_connector = cache_stats.get('real_connector', False)
+                
+                if connector_available:
+                    print('\nPERFECT! XConnector is fully operational!')
+                    print('Ready for cache testing!')
+                else:
+                    print('\nWARNING: Connector class not available')
+            except Exception as e:
+                print(f'Error getting cache stats: {e}')
+        else:
+            print('WARNING: Cache adapter not properly initialized')
+            
+except Exception as e:
+    print(f'ERROR: {e}')
+    import traceback
+    traceback.print_exc()
+PYEOF
+```
+
+#### 9.3 启动Dynamo时使用带XConnector的配置文件
+```bash# 确保使用包含XConnector配置的配置文件
+cd $DYNAMO_HOME/examples/llm
+
+# 启动时必须使用包含xconnector配置的文件
+dynamo serve graphs.agg:Frontend -f /workspace/configs/agg_with_xconnector.yaml
+```
+
+#### 9.4 启动后验证缓存功能
+
+```bash
+# 服务启动后，运行缓存测试验证XConnector是否工作
+python3 /workspace/test_xconnector_cache.py
+```
 ## 🔧 故障排查
 
 ### 常见问题及解决方案
