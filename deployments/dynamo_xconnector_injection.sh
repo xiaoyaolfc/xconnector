@@ -10,7 +10,7 @@ echo "=================================="
 # 配置参数
 WORKSPACE_DIR="/workspace"
 XCONNECTOR_DIR="${WORKSPACE_DIR}/xconnector"
-INIT_SCRIPT="${WORKSPACE_DIR}/xconnector/xconnector_worker_init.py"
+INIT_SCRIPT="${WORKSPACE_DIR}/xconnector_worker_init.py"
 DYNAMO_CONFIG="${WORKSPACE_DIR}/examples/llm/configs/agg_with_xconnector.yaml"
 
 # 1. 确保初始化脚本存在
@@ -81,7 +81,10 @@ echo "✅ 创建了初始化钩子: /tmp/xconnector_init_hook.py"
 
 # 4. 修改Dynamo配置，添加worker初始化环境
 create_enhanced_dynamo_config() {
-    cat > "${WORKSPACE_DIR}/examples/llm/configs/agg_with_xconnector_enhanced.yaml" << 'EOF'
+    # 创建配置文件到正确的位置
+    mkdir -p "${DYNAMO_HOME}/examples/llm/configs"
+
+    cat > "${DYNAMO_HOME}/examples/llm/configs/agg_with_xconnector_enhanced.yaml" << 'EOF'
 Common:
   model: /data/model/DeepSeek-R1-Distill-Llama-8B
   block-size: 32
@@ -125,7 +128,7 @@ Planner:
   no-operation: true
 EOF
 
-    echo "✅ 创建了增强版Dynamo配置: agg_with_xconnector_enhanced.yaml"
+    echo "✅ 创建了增强版Dynamo配置: ${DYNAMO_HOME}/examples/llm/configs/agg_with_xconnector_enhanced.yaml"
 }
 
 # 5. 创建启动包装脚本
@@ -150,8 +153,8 @@ else
     exit 1
 fi
 
-# 检查配置文件
-CONFIG_FILE="/workspace/examples/llm/configs/agg_with_xconnector_enhanced.yaml"
+# 检查配置文件 - 修正路径到正确的位置
+CONFIG_FILE="./configs/agg_with_xconnector_enhanced.yaml"
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "❌ Dynamo配置文件不存在: $CONFIG_FILE"
     echo "请先运行: ./dynamo_xconnector_injection.sh"
@@ -169,11 +172,13 @@ else
     echo "⚠️  XConnector初始化测试有问题，但继续启动"
 fi
 
-# 启动Dynamo
+# 启动Dynamo - 使用正确的目录和路径
 echo "🚀 启动Dynamo服务..."
-cd /workspace
 
-# 使用增强配置启动Dynamo
+# 切换到正确的目录 - 这很关键！
+cd $DYNAMO_HOME/examples/llm
+
+# 使用标准启动方式
 dynamo serve graphs.agg:Frontend -f "$CONFIG_FILE"
 EOF
 
