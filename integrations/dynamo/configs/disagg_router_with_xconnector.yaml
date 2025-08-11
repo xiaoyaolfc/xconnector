@@ -1,12 +1,12 @@
 Common:
-  model: /data/model/DeepSeek-R1-Distill-Llama-8B  # 🔧 使用小模型
-  block-size: 32                                    # 🔧 减少块大小
-  max-model-len: 8192                              # 🔧 减少最大长度
+  model: /data/model/DeepSeek-R1-Distill-Llama-8B  # 修正：使用 8B 模型
+  block-size: 32
+  max-model-len: 4096                              # 进一步减少
   router: kv
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
-  served_model_name: DeepSeek-R1-Distill-Llama-8B
+  served_model_name: DeepSeek-R1-Distill-Llama-8B  # 修正：使用 8B 模型名
   endpoint: dynamo.Processor.chat/completions
   port: 8000
 
@@ -18,73 +18,30 @@ Router:
   common-configs: [model, block-size, router]
 
 VllmWorker:
-  max-num-batched-tokens: 8192                     # 🔧 减少批处理大小
+  max-num-batched-tokens: 4096                     # 进一步减少
   remote-prefill: true
   conditional-disagg: true
-  max-local-prefill-length: 8                      # 🔧 减少本地预填充长度
-  max-prefill-queue-size: 2
-  tensor-parallel-size: 8
-  enable-prefix-caching: true
-  gpu-memory-utilization: 0.80                     # 🔧 分离模式使用更保守的内存
+  max-local-prefill-length: 4                      # 减少
+  max-prefill-queue-size: 1                        # 减少
+  tensor-parallel-size: 2                          # 关键修复：减少 TP 大小
+  enable-prefix-caching: false                     # 在分离模式下禁用
+  gpu-memory-utilization: 0.70                     # 更保守
+  enforce-eager: true                               # 添加：避免图模式
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '8'
+      gpu: '2'                                      # 匹配 tensor-parallel-size
   common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
 
 PrefillWorker:
-  max-num-batched-tokens: 8192                     # 🔧 减少批处理大小
-  gpu-memory-utilization: 0.80                     # 🔧 添加内存利用率控制
+  max-num-batched-tokens: 4096
+  gpu-memory-utilization: 0.70
+  tensor-parallel-size: 2                          # 添加：匹配主 Worker
+  enforce-eager: true                               # 添加
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '8'
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
-
-Planner:
-  environment: local
-  no-operation: true
-Common:
-  model: /data/model/DeepSeek-R1-Distill-Llama-8B  # 🔧 使用小模型
-  block-size: 32                                    # 🔧 减少块大小
-  max-model-len: 8192                              # 🔧 减少最大长度
-  router: kv
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-
-Frontend:
-  served_model_name: DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
-  port: 8000
-
-Processor:
-  common-configs: [model, block-size, max-model-len, router]
-
-Router:
-  min-workers: 1
-  common-configs: [model, block-size, router]
-
-VllmWorker:
-  max-num-batched-tokens: 8192                     # 🔧 减少批处理大小
-  remote-prefill: true
-  conditional-disagg: true
-  max-local-prefill-length: 8                      # 🔧 减少本地预填充长度
-  max-prefill-queue-size: 2
-  tensor-parallel-size: 8
-  enable-prefix-caching: true
-  gpu-memory-utilization: 0.80                     # 🔧 分离模式使用更保守的内存
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '8'
-  common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
-
-PrefillWorker:
-  max-num-batched-tokens: 8192                     # 🔧 减少批处理大小
-  gpu-memory-utilization: 0.80                     # 🔧 添加内存利用率控制
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '8'
+      gpu: '2'                                      # 匹配 tensor-parallel-size
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 Planner:

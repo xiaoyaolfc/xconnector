@@ -1,33 +1,51 @@
 xconnector:
   enabled: true
-  mode: "embedded" 
+  mode: embedded
   offline_mode: true
-  
-  # 明确禁用外部服务
+
   etcd:
-    enabled: false
-  
+    endpoints: ['http://127.0.0.1:2379']
+    timeout: 5
+    enabled: true
+
   nats:
-    enabled: false
-    
-  distributed:
-    enabled: false
-  
-  # 基础适配器配置
-  adapters:
-    - name: "minimal_cache"
-      type: "cache" 
-      class_path: "xconnector.adapters.cache.memory_cache_adapter.MemoryCacheAdapter"
-      config:
-        max_size: 1024
-      enabled: true
-  
-  # 日志配置
+    url: 'nats://127.0.0.1:4222'
+    timeout: 5
+    enabled: true
+
+  cache:
+    provider: memory
+    max_size: 1GB
+    ttl: 3600
+
+  kv_transfer:
+    connector: DynamoNixlConnector
+    batch_size: 1000
+    compression: false
+
   logging:
-    level: "INFO"
+    level: INFO
+    file: /workspace/logs/xconnector.log
     console: true
-    
-  # 故障处理
+
   fault_tolerance:
     graceful_degradation: true
-    fail_on_error: false
+    retry_attempts: 3
+    offline_fallback: true
+
+sdk:
+  mode: embedded
+  enable_kv_cache: true
+  enable_distributed: true
+
+  adapters:
+    - name: lmcache
+      type: cache
+      class_path: xconnector.adapters.cache.lmcache_adapter.LMCacheAdapter
+      config:
+        storage_backend: memory
+        max_cache_size: 1024
+        enable_compression: true
+        block_size: 16
+      enabled: true
+      priority: 1
