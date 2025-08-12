@@ -136,7 +136,7 @@ def _create_send_kv_wrapper(original_method: Callable, sdk) -> Callable:
         original_method: 原始方法
         sdk: MinimalXConnectorSDK实例
 
-    Returns:
+    Returns:x`
         包装后的方法
     """
 

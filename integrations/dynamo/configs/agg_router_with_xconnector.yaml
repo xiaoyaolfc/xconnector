@@ -1,8 +1,9 @@
+# 修复后的Dynamo配置文件
 Common:
-  model: /data/model/DeepSeek-R1-Distill-Llama-8B  # 🔧 使用小模型
+  model: /data/model/DeepSeek-R1-Distill-Llama-8B
   router: kv
-  block-size: 32                                    # 🔧 减少块大小
-  max-model-len: 8192                              # 🔧 减少最大长度
+  block-size: 32
+  max-model-len: 8192
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
@@ -11,19 +12,30 @@ Frontend:
   port: 8000
 
 Processor:
+  router: round-robin  # 添加明确的路由策略
+  router-num-threads: 2
   common-configs: [model, block-size, max-model-len, router]
 
+# 确保Router组件被正确定义
 Router:
   min-workers: 1
+  max-workers: 2
   softmax-sample: true
+  # 添加服务参数
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '0'  # Router不需要太多GPU资源
   common-configs: [model, block-size, router]
 
 VllmWorker:
   enforce-eager: true
-  max-num-batched-tokens: 8192                     # 🔧 减少批处理大小
+  max-num-batched-tokens: 8192
   enable-prefix-caching: true
   tensor-parallel-size: 8
-  gpu-memory-utilization: 0.85                     # 🔧 添加内存利用率控制
+  gpu-memory-utilization: 0.85
+  # 添加更多稳定性配置
+  max-num-seqs: 4
   ServiceArgs:
     workers: 1
     resources:
@@ -33,3 +45,28 @@ VllmWorker:
 Planner:
   environment: local
   no-operation: true
+
+# 添加XConnector配置块
+xconnector:
+  enabled: true
+  mode: embedded
+  config_file: "/workspace/configs/dynamo-xconnector.yaml"
+  
+  # 内联配置（作为备用）
+  adapters:
+    lmcache:
+      enabled: true
+      storage_backend: memory
+      max_cache_size: 2048
+    vllm:
+      enabled: true
+      model_name: "DeepSeek-R1-Distill-Llama-8B"
+    dynamo:
+      enabled: true
+      namespace: "dynamo"
+
+# etcd和NATS配置
+etcd-endpoints:
+  - "http://127.0.0.1:2379"
+  
+nats-url: "nats://127.0.0.1:4222"
